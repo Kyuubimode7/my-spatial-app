@@ -213,8 +213,9 @@ export default function MapComponent() {
 
                 console.log('[map] fetched — hospitals:', h.features?.length, 'roads:', r.features?.length, 'subdistricts:', s.features?.length);
 
-                // Derive unique hospital types from data
+                // Derive unique hospital types from data; append 'No Data' sentinel for null-type hospitals
                 const types = [...new Set(h.features.map(f => f.properties?.['Hospital Type']).filter(Boolean))];
+                types.push('No Data');
                 const initialVisible = new Set(types);
                 setHospitalTypes(types);
                 setVisibleTypes(initialVisible);
@@ -242,8 +243,14 @@ export default function MapComponent() {
         setIsComputing(true);
         try {
             const vt = overrideVisibleTypes ?? visibleTypesRef.current;
-            const filteredBase = baseH.features.filter(f => !f.properties?.['Hospital Type'] || vt.has(f.properties['Hospital Type']));
-            const filteredUser = userH.filter(f => !f.properties?.['Hospital Type'] || vt.has(f.properties['Hospital Type']));
+            const filteredBase = baseH.features.filter(f => {
+                const t = f.properties?.['Hospital Type'];
+                return t ? vt.has(t) : vt.has('No Data');
+            });
+            const filteredUser = userH.filter(f => {
+                const t = f.properties?.['Hospital Type'];
+                return t ? vt.has(t) : vt.has('No Data');
+            });
             const combined = { ...baseH, features: [...filteredBase, ...filteredUser] };
             const results = await solveCarePathway(JSON.stringify(combined), JSON.stringify(r), JSON.stringify(s));
             console.log('[map] compute result — carepathway features:', results?.carepathway?.features?.length);
@@ -320,7 +327,10 @@ export default function MapComponent() {
     // ── Filtered hospitals for display only ───────────────────────────────────
 
     const displayedHospitals = hospitals
-        ? { ...hospitals, features: hospitals.features.filter(f => visibleTypes.has(f.properties?.['Hospital Type'])) }
+        ? { ...hospitals, features: hospitals.features.filter(f => {
+              const t = f.properties?.['Hospital Type'];
+              return t ? visibleTypes.has(t) : visibleTypes.has('No Data');
+          }) }
         : null;
 
     // ── Styles ─────────────────────────────────────────────────────────────────
@@ -348,9 +358,11 @@ export default function MapComponent() {
             {/* Cursor loading spinner */}
             <div ref={spinnerRef} style={{
                 position: 'fixed', zIndex: 9999, pointerEvents: 'none',
-                width: 18, height: 18,
-                border: '2px solid #ddd', borderTop: '2px solid #1d6ef5',
+                width: 20, height: 20,
+                background: 'white',
                 borderRadius: '50%',
+                boxShadow: '0 1px 4px rgba(0,0,0,0.2)',
+                border: '2px solid #ddd', borderTop: '2px solid #1d6ef5',
                 animation: 'spin 0.7s linear infinite',
                 display: isComputing ? 'block' : 'none',
             }} />
@@ -463,7 +475,7 @@ export default function MapComponent() {
                     attribution={basemap === 'osm' ? '© OpenStreetMap contributors' : '© Esri'}
                 />
 
-                {roads && <GeoJSON data={roads} style={{ color: 'gray', weight: 1 }} />}
+                {/* {roads && <GeoJSON data={roads} style={{ color: 'gray', weight: 1 }} />} */}
 
                 {/*{subdistricts && (
                     <GeoJSON data={subdistricts} style={{ color: 'blue', stroke: true, weight: 0.5, fillOpacity: 0.03 }} />
