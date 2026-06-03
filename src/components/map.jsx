@@ -202,10 +202,11 @@ export default function MapComponent() {
     useEffect(() => {
         const load = async () => {
             try {
+                const base = import.meta.env.BASE_URL;
                 const [hospRes, roadsRes, subdistRes] = await Promise.all([
-                    fetch('/laturHospital.geojson'),
-                    fetch('/laturRoad.geojson'),
-                    fetch('/laturSubdistrict.geojson'),
+                    fetch(`${base}laturHospital.geojson`),
+                    fetch(`${base}laturRoad.geojson`),
+                    fetch(`${base}laturSubdistrict.geojson`),
                 ]);
                 const h = await hospRes.json();
                 const r = await roadsRes.json();

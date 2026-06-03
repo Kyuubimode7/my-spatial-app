@@ -86,9 +86,10 @@ export async function solveCarePathway(hospitalsStr, roadsStr, subdistStr) {
 
     console.log('[turf] inputs — hospitals:', inputHospital.features.length, 'roads:', inputRoad.features.length, 'subdist:', inputSubdist.features.length);
 
+    const base = import.meta.env.BASE_URL;
     const [hyderabadMR, puneMR] = await Promise.all([
-        fetch('/Hydrabad_MR.geojson').then((r) => r.json()),
-        fetch('/Pune_MR.geojson').then((r) => r.json()),
+        fetch(`${base}Hydrabad_MR.geojson`).then((r) => r.json()),
+        fetch(`${base}Pune_MR.geojson`).then((r) => r.json()),
     ]);
     console.log('[turf] MR regions — hyderabad:', hyderabadMR.features.length, 'pune:', puneMR.features.length);
 
