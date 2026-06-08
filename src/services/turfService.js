@@ -3,8 +3,8 @@ import RBush from 'rbush';
 import createGraph from 'ngraph.graph';
 import { aStar } from 'ngraph.path';
 
-const CLUSTER_RADIUS = 0.4; // km
-const SEARCH_RADIUS = 0.1;  // degrees
+const DEFAULT_CLUSTER_RADIUS = 0.4;
+const DEFAULT_SEARCH_RADIUS = 0.1;
 
 function mergeToPoint(features) {
     return turf.centroid(turf.featureCollection(features));
@@ -24,15 +24,15 @@ function buildIndex(roads) {
     return tree;
 }
 
-function splitNetworkWithPoints(network, pts) {
+function splitNetworkWithPoints(network, pts, searchRadius) {
     let tree = buildIndex(network);
     const snappedPts = pts.map((shatterPt) => {
         const [px, py] = shatterPt.geometry.coordinates;
         const candidates = tree.search({
-            minX: px - SEARCH_RADIUS,
-            minY: py - SEARCH_RADIUS,
-            maxX: px + SEARCH_RADIUS,
-            maxY: py + SEARCH_RADIUS,
+            minX: px - searchRadius,
+            minY: py - searchRadius,
+            maxX: px + searchRadius,
+            maxY: py + searchRadius,
         });
 
         let minDistance = Infinity;
@@ -79,7 +79,9 @@ const careBands = [
     { upTo: Infinity, color: '#7c0d0d', weight: 3 },
 ];
 
-export async function solveCarePathway(hospitalsStr, roadsStr, subdistStr) {
+export async function solveCarePathway(hospitalsStr, roadsStr, subdistStr, settings = {}) {
+    const CLUSTER_RADIUS = settings.clusterRadius ?? DEFAULT_CLUSTER_RADIUS;
+    const SEARCH_RADIUS  = settings.searchRadius  ?? DEFAULT_SEARCH_RADIUS;
     const inputHospital = JSON.parse(hospitalsStr);
     const inputRoad     = JSON.parse(roadsStr);
     const inputSubdist  = JSON.parse(subdistStr);
@@ -146,8 +148,8 @@ export async function solveCarePathway(hospitalsStr, roadsStr, subdistStr) {
     const network = [...inputRoad.features];
 
     console.time('road-splitting');
-    const snappedHospitals = splitNetworkWithPoints(network, mergedHospitals.features);
-    const snappedSubdist   = splitNetworkWithPoints(network, vcSubdist.features);
+    const snappedHospitals = splitNetworkWithPoints(network, mergedHospitals.features, SEARCH_RADIUS);
+    const snappedSubdist   = splitNetworkWithPoints(network, vcSubdist.features, SEARCH_RADIUS);
     console.timeEnd('road-splitting');
     console.log('[turf] after splitting — snapped hospitals:', snappedHospitals.features.length, 'snapped subdist:', snappedSubdist.features.length, 'network segments:', network.length);
 

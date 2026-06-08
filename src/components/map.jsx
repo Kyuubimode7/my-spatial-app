@@ -14,7 +14,6 @@ const CARE_BANDS = [
 ];
 
 const HOSPITAL_TYPES = ['Public', 'Private (For Profit)', 'Private (Not for Profit)'];
-
 const EMPANELMENT_OPTIONS = ['', 'PMJAY', 'Yes (Not Specified)'];
 
 const BOOLEAN_FIELDS = [
@@ -32,6 +31,34 @@ const DEFAULT_PROPS = {
     'Empanelment Type': '', 'Sub-District ID': '', 'Radiation Bunker LINAC': '',
     ...Object.fromEntries(BOOLEAN_FIELDS.map(f => [f, false])),
     source: 'user_added',
+};
+
+const FUNCTION_KEYS = ['carepathway', 'voronoi', 'weighted-voronoi', 'circles', 'fn5', 'fn6'];
+const FUNCTION_NAMES = {
+    'carepathway':      'Care Pathways',
+    'voronoi':          'Voronoi',
+    'weighted-voronoi': 'Weighted Voronoi',
+    'circles':          'Overlapping Circles',
+    'fn5':              'Function 5',
+    'fn6':              'Function 6',
+};
+
+const BASEMAPS = {
+    satellite: {
+        url: 'https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}',
+        attribution: '© Esri',
+        label: 'SAT',
+    },
+    terrain: {
+        url: 'https://{s}.tile.opentopomap.org/{z}/{x}/{y}.png',
+        attribution: '© OpenTopoMap contributors',
+        label: 'TER',
+    },
+    osm: {
+        url: 'https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png',
+        attribution: '© OpenStreetMap contributors',
+        label: 'OSM',
+    },
 };
 
 const baseHospitalIcon = L.divIcon({
@@ -59,11 +86,13 @@ function MapClickHandler({ activeToolMode, onAddClick }) {
 
 function HospitalDialog({ dialogState, onSubmit, onClose }) {
     const [form, setForm] = useState(dialogState.data);
-
     const set = (key, val) => setForm(f => ({ ...f, [key]: val }));
 
     const labelStyle = { display: 'block', fontSize: 12, fontWeight: 600, marginBottom: 2, marginTop: 10 };
-    const inputStyle = { width: '100%', padding: '4px 6px', boxSizing: 'border-box', fontSize: 13, border: '1px solid #ccc', borderRadius: 4, background: 'white', color: '#222' };
+    const inputStyle = {
+        width: '100%', padding: '4px 6px', boxSizing: 'border-box',
+        fontSize: 13, border: '1px solid #ccc', borderRadius: 4, background: 'white', color: '#222',
+    };
 
     return (
         <div style={{
@@ -109,19 +138,22 @@ function HospitalDialog({ dialogState, onSubmit, onClose }) {
                     <textarea style={{ ...inputStyle, height: 56, resize: 'vertical' }} value={form.description || ''} onChange={e => set('description', e.target.value)} />
 
                     <div style={{ marginTop: 12, marginBottom: 4, fontWeight: 700, fontSize: 12, color: '#555', textTransform: 'uppercase', letterSpacing: 1 }}>Capacity</div>
-
-                    {[['Bed Count', 'Bed Count'], ['ICU Bed Count', 'ICU Bed Count'], ['ot count', 'OT Count'],
-                      ['Doctor Count', 'Doctor Count'], ['Staff Count', 'Staff Count'],
-                      ['Radiation Bunker LINAC', 'Radiation Bunker LINAC']].map(([key, label]) => (
+                    {[
+                        ['Bed Count', 'Bed Count'], ['ICU Bed Count', 'ICU Bed Count'],
+                        ['ot count', 'OT Count'], ['Doctor Count', 'Doctor Count'],
+                        ['Staff Count', 'Staff Count'], ['Radiation Bunker LINAC', 'Radiation Bunker LINAC'],
+                    ].map(([key, label]) => (
                         <React.Fragment key={key}>
                             <label style={labelStyle}>{label}</label>
                             <input style={inputStyle} type="number" min="0"
-                                value={form[key] ?? ''} onChange={e => set(key, e.target.value === '' ? null : Number(e.target.value))} />
+                                value={form[key] ?? ''}
+                                onChange={e => set(key, e.target.value === '' ? null : Number(e.target.value))} />
                         </React.Fragment>
                     ))}
 
                     <label style={labelStyle}>Built-up Area (sq ft)</label>
-                    <input style={inputStyle} value={form['Built up area  ( sq ft )'] || ''} onChange={e => set('Built up area  ( sq ft )', e.target.value)} />
+                    <input style={inputStyle} value={form['Built up area  ( sq ft )'] || ''}
+                        onChange={e => set('Built up area  ( sq ft )', e.target.value)} />
 
                     <div style={{ marginTop: 12, marginBottom: 6, fontWeight: 700, fontSize: 12, color: '#555', textTransform: 'uppercase', letterSpacing: 1 }}>Services</div>
                     <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '4px 12px' }}>
@@ -134,7 +166,6 @@ function HospitalDialog({ dialogState, onSubmit, onClose }) {
                     </div>
 
                     <div style={{ marginTop: 12, marginBottom: 4, fontWeight: 700, fontSize: 12, color: '#555', textTransform: 'uppercase', letterSpacing: 1 }}>Admin</div>
-
                     <label style={labelStyle}>Accreditation</label>
                     <input style={inputStyle} value={form.Accreditation || ''} onChange={e => set('Accreditation', e.target.value)} />
 
@@ -148,13 +179,64 @@ function HospitalDialog({ dialogState, onSubmit, onClose }) {
                 </div>
 
                 <div style={{ padding: '12px 18px', borderTop: '1px solid #eee', display: 'flex', justifyContent: 'flex-end', gap: 8 }}>
-                    <button onClick={onClose}
-                        style={{ padding: '6px 14px', border: '1px solid #ccc', borderRadius: 5, cursor: 'pointer', background: 'white' }}>
+                    <button onClick={onClose} style={{ padding: '6px 14px', border: '1px solid #ccc', borderRadius: 5, cursor: 'pointer', background: 'white' }}>
                         Cancel
                     </button>
-                    <button onClick={() => onSubmit(form)}
-                        style={{ padding: '6px 14px', border: 'none', borderRadius: 5, cursor: 'pointer', background: '#1d6ef5', color: 'white', fontWeight: 600 }}>
+                    <button onClick={() => onSubmit(form)} style={{ padding: '6px 14px', border: 'none', borderRadius: 5, cursor: 'pointer', background: '#1d6ef5', color: 'white', fontWeight: 600 }}>
                         {dialogState.mode === 'add' ? 'Add' : 'Save'}
+                    </button>
+                </div>
+            </div>
+        </div>
+    );
+}
+
+function FunctionSettingsDialog({ activeFunction, settings, onSave, onClose }) {
+    const [local, setLocal] = useState({ ...settings });
+    const set = (key, val) => setLocal(s => ({ ...s, [key]: val }));
+
+    const labelStyle = { display: 'block', fontSize: 12, fontWeight: 600, marginBottom: 2, marginTop: 10 };
+    const inputStyle = {
+        width: '100%', padding: '4px 6px', boxSizing: 'border-box',
+        fontSize: 13, border: '1px solid #ccc', borderRadius: 4, background: 'white', color: '#222',
+    };
+
+    return (
+        <div style={{
+            position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.45)',
+            zIndex: 3000, display: 'flex', alignItems: 'center', justifyContent: 'center',
+        }}>
+            <div style={{
+                background: 'white', borderRadius: 10, width: 340,
+                display: 'flex', flexDirection: 'column', boxShadow: '0 4px 20px rgba(0,0,0,0.3)',
+            }}>
+                <div style={{ padding: '14px 18px', borderBottom: '1px solid #eee', fontWeight: 'bold', fontSize: 15 }}>
+                    {FUNCTION_NAMES[activeFunction]} — Settings
+                </div>
+                <div style={{ padding: '10px 18px 18px' }}>
+                    {activeFunction === 'carepathway' ? (
+                        <>
+                            <label style={labelStyle}>Cluster Radius (km)</label>
+                            <input style={inputStyle} type="number" step="0.05" min="0.1"
+                                value={local.clusterRadius}
+                                onChange={e => set('clusterRadius', Number(e.target.value))} />
+                            <label style={labelStyle}>Search Radius (degrees)</label>
+                            <input style={inputStyle} type="number" step="0.01" min="0.01"
+                                value={local.searchRadius}
+                                onChange={e => set('searchRadius', Number(e.target.value))} />
+                        </>
+                    ) : (
+                        <div style={{ padding: '16px 0', color: '#888', fontSize: 13, textAlign: 'center' }}>
+                            Settings coming soon
+                        </div>
+                    )}
+                </div>
+                <div style={{ padding: '12px 18px', borderTop: '1px solid #eee', display: 'flex', justifyContent: 'flex-end', gap: 8 }}>
+                    <button onClick={onClose} style={{ padding: '6px 14px', border: '1px solid #ccc', borderRadius: 5, cursor: 'pointer', background: 'white' }}>
+                        Cancel
+                    </button>
+                    <button onClick={() => onSave(local)} style={{ padding: '6px 14px', border: 'none', borderRadius: 5, cursor: 'pointer', background: '#1d6ef5', color: 'white', fontWeight: 600 }}>
+                        Save
                     </button>
                 </div>
             </div>
@@ -172,19 +254,23 @@ export default function MapComponent() {
     const [computedOutputs, setComputedOutputs] = useState({ carepathway: null });
     const [isComputing, setIsComputing] = useState(false);
     const [activeToolMode, setActiveToolMode] = useState(null);
-    const [menuOpen, setMenuOpen] = useState(false);
+    const [editOpen, setEditOpen] = useState(false);
     const [dialogState, setDialogState] = useState(null);
     const [basemap, setBasemap] = useState('osm');
-    const [basemapOpacity, setBasemapOpacity] = useState(1);
     const [visibleTypes, setVisibleTypes] = useState(new Set(HOSPITAL_TYPES));
     const [hospitalTypes, setHospitalTypes] = useState(HOSPITAL_TYPES);
+    const [activeFunction, setActiveFunction] = useState('carepathway');
+    const [functionSettings, setFunctionSettings] = useState({ clusterRadius: 0.4, searchRadius: 0.1 });
+    const [functionSettingsOpen, setFunctionSettingsOpen] = useState(false);
 
     const roadsRef = useRef(null);
     const subdistRef = useRef(null);
     const hospitalsRef = useRef(null);
     const userAddedHospitalsRef = useRef([]);
     const visibleTypesRef = useRef(new Set(HOSPITAL_TYPES));
+    const functionSettingsRef = useRef({ clusterRadius: 0.4, searchRadius: 0.1 });
     const spinnerRef = useRef(null);
+    const importInputRef = useRef(null);
 
     useEffect(() => {
         const move = (e) => {
@@ -214,7 +300,6 @@ export default function MapComponent() {
 
                 console.log('[map] fetched — hospitals:', h.features?.length, 'roads:', r.features?.length, 'subdistricts:', s.features?.length);
 
-                // Derive unique hospital types from data; append 'No Data' sentinel for null-type hospitals
                 const types = [...new Set(h.features.map(f => f.properties?.['Hospital Type']).filter(Boolean))];
                 types.push('No Data');
                 const initialVisible = new Set(types);
@@ -240,10 +325,11 @@ export default function MapComponent() {
 
     // ── Compute ────────────────────────────────────────────────────────────────
 
-    const triggerCompute = async (baseH, userH, r, s, overrideVisibleTypes) => {
+    const triggerCompute = async (baseH, userH, r, s, overrideVisibleTypes, overrideSettings) => {
         setIsComputing(true);
         try {
             const vt = overrideVisibleTypes ?? visibleTypesRef.current;
+            const settings = overrideSettings ?? functionSettingsRef.current;
             const filteredBase = baseH.features.filter(f => {
                 const t = f.properties?.['Hospital Type'];
                 return t ? vt.has(t) : vt.has('No Data');
@@ -253,7 +339,7 @@ export default function MapComponent() {
                 return t ? vt.has(t) : vt.has('No Data');
             });
             const combined = { ...baseH, features: [...filteredBase, ...filteredUser] };
-            const results = await solveCarePathway(JSON.stringify(combined), JSON.stringify(r), JSON.stringify(s));
+            const results = await solveCarePathway(JSON.stringify(combined), JSON.stringify(r), JSON.stringify(s), settings);
             console.log('[map] compute result — carepathway features:', results?.carepathway?.features?.length);
             if (results) setComputedOutputs(results);
         } catch (err) {
@@ -263,7 +349,7 @@ export default function MapComponent() {
         }
     };
 
-    // ── Tool mode toggle ───────────────────────────────────────────────────────
+    // ── Tool mode ──────────────────────────────────────────────────────────────
 
     const setTool = (mode) => setActiveToolMode(prev => prev === mode ? null : mode);
 
@@ -277,7 +363,10 @@ export default function MapComponent() {
         const feature = {
             type: 'Feature',
             properties: { ...formData },
-            geometry: { type: 'Point', coordinates: [dialogState.latlng?.lng ?? 0, dialogState.latlng?.lat ?? 0] },
+            geometry: {
+                type: 'Point',
+                coordinates: [dialogState.latlng?.lng ?? 0, dialogState.latlng?.lat ?? 0],
+            },
         };
 
         let updated;
@@ -291,7 +380,7 @@ export default function MapComponent() {
         userAddedHospitalsRef.current = updated;
         setUserAddedHospitals(updated);
         setDialogState(null);
-        triggerCompute(hospitals, updated, roadsRef.current, subdistRef.current);
+        triggerCompute(hospitalsRef.current, updated, roadsRef.current, subdistRef.current);
     };
 
     // ── Move hospital ──────────────────────────────────────────────────────────
@@ -313,6 +402,40 @@ export default function MapComponent() {
         triggerCompute(hospitalsRef.current, updated, roadsRef.current, subdistRef.current);
     };
 
+    // ── Import / Export ────────────────────────────────────────────────────────
+
+    const handleImport = (e) => {
+        const file = e.target.files?.[0];
+        if (!file) return;
+        const reader = new FileReader();
+        reader.onload = (ev) => {
+            try {
+                const parsed = JSON.parse(ev.target.result);
+                if (parsed.type !== 'FeatureCollection') throw new Error('Not a FeatureCollection');
+                const points = parsed.features.filter(f => f.geometry?.type === 'Point');
+                userAddedHospitalsRef.current = points;
+                setUserAddedHospitals(points);
+                triggerCompute(hospitalsRef.current, points, roadsRef.current, subdistRef.current);
+            } catch (err) {
+                console.error('Import failed:', err);
+                alert('Invalid GeoJSON file. Must be a FeatureCollection of Points.');
+            }
+        };
+        reader.readAsText(file);
+        e.target.value = '';
+    };
+
+    const handleExport = () => {
+        const fc = { type: 'FeatureCollection', features: userAddedHospitals };
+        const blob = new Blob([JSON.stringify(fc, null, 2)], { type: 'application/json' });
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement('a');
+        a.href = url;
+        a.download = 'user-hospitals.geojson';
+        a.click();
+        URL.revokeObjectURL(url);
+    };
+
     // ── Filter ─────────────────────────────────────────────────────────────────
 
     const toggleType = (type) => {
@@ -325,125 +448,166 @@ export default function MapComponent() {
         }
     };
 
-    // ── Filtered hospitals for display only ───────────────────────────────────
+    // ── Function switcher ──────────────────────────────────────────────────────
 
-    const displayedHospitals = hospitals
-        ? { ...hospitals, features: hospitals.features.filter(f => {
-              const t = f.properties?.['Hospital Type'];
-              return t ? visibleTypes.has(t) : visibleTypes.has('No Data');
-          }) }
-        : null;
-
-    // ── Styles ─────────────────────────────────────────────────────────────────
-
-    const panelStyle = {
-        background: 'white', borderRadius: 8, boxShadow: '0 2px 8px rgba(0,0,0,0.25)',
-        padding: '10px 14px',
+    const handleFunctionClick = (key) => {
+        if (key === activeFunction) return;
+        setActiveFunction(key);
+        if (key === 'carepathway' && hospitalsRef.current && roadsRef.current && subdistRef.current) {
+            triggerCompute(hospitalsRef.current, userAddedHospitalsRef.current, roadsRef.current, subdistRef.current);
+        } else {
+            setComputedOutputs({ carepathway: null });
+        }
     };
 
-    const toolBtnStyle = (active) => ({
-        padding: '5px 10px', border: '1px solid #ccc', borderRadius: 5, cursor: 'pointer', fontSize: 12,
-        background: active ? '#1d6ef5' : 'white', color: active ? 'white' : '#333', fontWeight: active ? 600 : 400,
-    });
+    const handleFunctionDoubleClick = (key) => {
+        if (key === activeFunction) setFunctionSettingsOpen(true);
+    };
 
-    const sectionLabel = { fontWeight: 700, fontSize: 11, color: '#222', textTransform: 'uppercase', letterSpacing: 1, marginBottom: 6, marginTop: 12 };
+    const handleFunctionSettingsSave = (newSettings) => {
+        functionSettingsRef.current = newSettings;
+        setFunctionSettings(newSettings);
+        setFunctionSettingsOpen(false);
+        if (activeFunction === 'carepathway' && hospitalsRef.current && roadsRef.current && subdistRef.current) {
+            triggerCompute(hospitalsRef.current, userAddedHospitalsRef.current, roadsRef.current, subdistRef.current, undefined, newSettings);
+        }
+    };
+
+    // ── Display filter ─────────────────────────────────────────────────────────
+
+    const displayedHospitals = hospitals
+        ? {
+            ...hospitals,
+            features: hospitals.features.filter(f => {
+                const t = f.properties?.['Hospital Type'];
+                return t ? visibleTypes.has(t) : visibleTypes.has('No Data');
+            }),
+          }
+        : null;
 
     // ── Render ─────────────────────────────────────────────────────────────────
 
+    const panelStyle = {
+        background: 'white', borderRadius: 8,
+        boxShadow: '0 2px 8px rgba(0,0,0,0.25)', padding: '10px 14px',
+    };
+
+    const toolBtnStyle = (active) => ({
+        padding: '6px 12px', border: '1px solid #ccc', borderRadius: 6,
+        cursor: 'pointer', fontSize: 12, whiteSpace: 'nowrap',
+        background: active ? '#1d6ef5' : 'white',
+        color: active ? 'white' : '#333',
+        fontWeight: active ? 600 : 400,
+    });
+
     return (
-        <div style={{ height: '100vh', width: '100vw', position: 'relative' }}>
+        <div style={{ height: '100vh', width: '100vw', position: 'relative', overflow: 'hidden' }}>
             <style>{`
                 @keyframes spin { to { transform: rotate(360deg); } }
-                .leaflet-top.leaflet-left { margin-top: 42px; }
+                .leaflet-top.leaflet-right .leaflet-control-zoom {
+                    border: 2px solid #22aa55 !important;
+                    border-radius: 6px !important;
+                    overflow: hidden !important;
+                    margin-top: 62px !important;
+                    margin-right: 10px !important;
+                    box-shadow: 0 2px 6px rgba(0,0,0,0.2) !important;
+                }
+                .leaflet-top.leaflet-right .leaflet-control-zoom a {
+                    border-bottom: 1px solid #e0e0e0 !important;
+                }
             `}</style>
+
             {/* Cursor loading spinner */}
             <div ref={spinnerRef} style={{
                 position: 'fixed', zIndex: 9999, pointerEvents: 'none',
-                width: 20, height: 20,
-                background: 'white',
-                borderRadius: '50%',
+                width: 20, height: 20, background: 'white', borderRadius: '50%',
                 boxShadow: '0 1px 4px rgba(0,0,0,0.2)',
                 border: '2px solid #ddd', borderTop: '2px solid #1d6ef5',
                 animation: 'spin 0.7s linear infinite',
                 display: isComputing ? 'block' : 'none',
             }} />
 
-            {/* Title */}
+            {/* Navbar */}
             <div style={{
                 position: 'absolute', top: 0, left: 0, right: 0, zIndex: 1100,
-                background: 'rgba(255,255,255,0.92)', textAlign: 'center',
-                padding: '9px 0', fontWeight: 'bold', fontSize: 17, letterSpacing: 3,
-                borderBottom: '1px solid #e0e0e0', pointerEvents: 'none',
+                background: '#111', height: 50,
+                display: 'flex', alignItems: 'center', justifyContent: 'space-between',
+                padding: '0 20px',
             }}>
-                CARE-PATHWAYS
+                <span style={{ color: 'white', fontWeight: 700, fontSize: 18, letterSpacing: 0.3 }}>
+                    Urban Health Data Platform
+                </span>
+                <div style={{ display: 'flex', gap: 28 }}>
+                    {['home', 'about', 'contact'].map(link => (
+                        <a key={link} href="#" onClick={e => e.preventDefault()}
+                            style={{ color: 'rgba(255,255,255,0.8)', fontSize: 13, textDecoration: 'none' }}>
+                            {link}
+                        </a>
+                    ))}
+                </div>
             </div>
 
-            {/* Hamburger button */}
-            <button
-                onClick={() => setMenuOpen(o => !o)}
-                style={{
-                    position: 'absolute', top: 48, right: 10, zIndex: 1200,
-                    width: 36, height: 36, borderRadius: 6, border: '1px solid #ccc',
-                    background: 'white', cursor: 'pointer',
-                    boxShadow: '0 2px 6px rgba(0,0,0,0.2)', display: 'flex', flexDirection: 'column',
-                    alignItems: 'center', justifyContent: 'center', gap: 4,
-                }}
-            >
-                {[0,1,2].map(i => (
-                    <span key={i} style={{ display: 'block', width: 18, height: 2, background: '#333', borderRadius: 1 }} />
-                ))}
-            </button>
+            {/* Function switcher — top-left, below navbar */}
+            <div style={{
+                position: 'absolute', top: 60, left: 10, zIndex: 1000,
+                display: 'flex', flexDirection: 'column', gap: 6,
+            }}>
+                {FUNCTION_KEYS.map((key, i) => {
+                    const isActive = activeFunction === key;
+                    return (
+                        <button
+                            key={key}
+                            title={FUNCTION_NAMES[key]}
+                            onClick={() => handleFunctionClick(key)}
+                            onDoubleClick={() => handleFunctionDoubleClick(key)}
+                            style={{
+                                width: 40, height: 40, borderRadius: 8,
+                                background: '#e8354a',
+                                border: isActive ? '3px solid white' : '3px solid transparent',
+                                boxShadow: isActive
+                                    ? '0 0 0 3px #e8354a, 0 2px 10px rgba(232,53,74,0.5)'
+                                    : '0 2px 6px rgba(0,0,0,0.25)',
+                                color: 'white', fontWeight: 700, fontSize: 14,
+                                cursor: 'pointer',
+                                display: 'flex', alignItems: 'center', justifyContent: 'center',
+                                transition: 'box-shadow 0.15s, border-color 0.15s',
+                            }}
+                        >
+                            {i + 1}
+                        </button>
+                    );
+                })}
+            </div>
 
-            {/* Hamburger menu panel */}
-            {menuOpen && (
-                <div style={{
-                    position: 'absolute', top: 90, right: 10, zIndex: 1200,
-                    ...panelStyle, width: 210,
-                }}>
-                    {/* Hospital section */}
-                    <div style={{ ...sectionLabel, marginTop: 4 }}>Hospital</div>
-                    <div style={{ display: 'flex', gap: 6 }}>
-                        {['add', 'edit', 'delete'].map(mode => (
-                            <button key={mode} style={toolBtnStyle(activeToolMode === mode)}
-                                onClick={() => setTool(mode)}>
-                                {mode.charAt(0).toUpperCase() + mode.slice(1)}
-                            </button>
-                        ))}
-                    </div>
-                    {activeToolMode === 'add' && <div style={{ fontSize: 11, color: '#888', marginTop: 5 }}>Click on the map to place a hospital</div>}
-                    {activeToolMode === 'edit' && <div style={{ fontSize: 11, color: '#888', marginTop: 5 }}>Drag to move • click to edit properties</div>}
-                    {activeToolMode === 'delete' && <div style={{ fontSize: 11, color: '#888', marginTop: 5 }}>Click a user hospital to remove it</div>}
-
-                    {/* Basemap section */}
-                    <hr style={{ border: 'none', borderTop: '1px solid #e8e8e8', margin: '12px 0 0' }} />
-                    <div style={sectionLabel}>Basemap</div>
-                    <div style={{ display: 'flex', gap: 10, marginBottom: 8 }}>
-                        {['osm', 'satellite'].map(b => (
-                            <label key={b} style={{ fontSize: 12, cursor: 'pointer', display: 'flex', alignItems: 'center', gap: 4 }}>
-                                <input type="radio" name="basemap" value={b} checked={basemap === b} onChange={() => setBasemap(b)} />
-                                {b === 'osm' ? 'OSM' : 'Satellite'}
-                            </label>
-                        ))}
-                    </div>
-                    <div style={{ display: 'flex', alignItems: 'center', gap: 8, fontSize: 12 }}>
-                        <span>Opacity</span>
-                        <input type="range" min="0" max="1" step="0.05" value={basemapOpacity}
-                            onChange={e => setBasemapOpacity(Number(e.target.value))}
-                            style={{ flex: 1 }} />
-                        <span>{Math.round(basemapOpacity * 100)}%</span>
-                    </div>
-                </div>
-            )}
-
-            {/* Legend — bottom right */}
-            <div style={{ position: 'absolute', bottom: 30, right: 10, zIndex: 1000, ...panelStyle }}>
-                <div style={{ fontWeight: 700, fontSize: 12, marginBottom: 8, color: '#111' }}>Care Bands</div>
-                {CARE_BANDS.map(({ color, label }) => (
-                    <div key={label} style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 5 }}>
-                        <span style={{ display: 'inline-block', width: 28, height: 4, background: color, borderRadius: 2, flexShrink: 0 }} />
-                        <span style={{ fontSize: 12, color: '#111' }}>{label}</span>
-                    </div>
-                ))}
+            {/* Basemap buttons — right side, below zoom control */}
+            <div style={{
+                position: 'absolute', top: 168, right: 10, zIndex: 1000,
+                display: 'flex', flexDirection: 'column', gap: 6,
+            }}>
+                {Object.entries(BASEMAPS).map(([key, bm]) => {
+                    const isActive = basemap === key;
+                    return (
+                        <button
+                            key={key}
+                            title={bm.label}
+                            onClick={() => setBasemap(key)}
+                            style={{
+                                width: 40, height: 40, borderRadius: 8,
+                                background: isActive ? '#1e40af' : '#1d4ed8',
+                                border: isActive ? '3px solid white' : '3px solid transparent',
+                                boxShadow: isActive
+                                    ? '0 0 0 3px #1d4ed8, 0 2px 10px rgba(29,78,216,0.4)'
+                                    : '0 2px 6px rgba(0,0,0,0.25)',
+                                color: 'white', fontWeight: 700, fontSize: 10,
+                                cursor: 'pointer',
+                                display: 'flex', alignItems: 'center', justifyContent: 'center',
+                                transition: 'box-shadow 0.15s, border-color 0.15s',
+                            }}
+                        >
+                            {bm.label}
+                        </button>
+                    );
+                })}
             </div>
 
             {/* Filter — bottom left */}
@@ -457,6 +621,90 @@ export default function MapComponent() {
                 ))}
             </div>
 
+            {/* Legend — bottom right, dynamic */}
+            <div style={{ position: 'absolute', bottom: 30, right: 10, zIndex: 1000, ...panelStyle, minWidth: 160 }}>
+                <div style={{ fontWeight: 700, fontSize: 12, marginBottom: 8, color: '#111' }}>Legend</div>
+                <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 5 }}>
+                    <span style={{
+                        display: 'inline-block', width: 10, height: 10, flexShrink: 0,
+                        background: '#111', border: '2px solid white', borderRadius: '50%',
+                        boxShadow: '0 1px 3px rgba(0,0,0,0.4)',
+                    }} />
+                    <span style={{ fontSize: 12, color: '#111' }}>Existing Hospital</span>
+                </div>
+                <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 2 }}>
+                    <span style={{
+                        display: 'inline-block', width: 10, height: 10, flexShrink: 0,
+                        background: '#1d6ef5', border: '2px solid white', borderRadius: '50%',
+                        boxShadow: '0 1px 3px rgba(0,0,0,0.4)',
+                    }} />
+                    <span style={{ fontSize: 12, color: '#111' }}>User Added Hospital</span>
+                </div>
+                {activeFunction === 'carepathway' && (
+                    <>
+                        <hr style={{ border: 'none', borderTop: '1px solid #e8e8e8', margin: '8px 0' }} />
+                        <div style={{ fontWeight: 700, fontSize: 11, marginBottom: 6, color: '#111', textTransform: 'uppercase', letterSpacing: 0.5 }}>Care Bands</div>
+                        {CARE_BANDS.map(({ color, label }) => (
+                            <div key={label} style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 5 }}>
+                                <span style={{ display: 'inline-block', width: 28, height: 4, background: color, borderRadius: 2, flexShrink: 0 }} />
+                                <span style={{ fontSize: 12, color: '#111' }}>{label}</span>
+                            </div>
+                        ))}
+                    </>
+                )}
+            </div>
+
+            {/* Edit toolbar — bottom center */}
+            <div style={{
+                position: 'absolute', bottom: 20, left: '50%', transform: 'translateX(-50%)',
+                zIndex: 1000, display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 8,
+            }}>
+                {editOpen && (
+                    <>
+                        <div style={{
+                            display: 'flex', gap: 6, background: 'white', borderRadius: 8,
+                            padding: '8px 10px', boxShadow: '0 2px 8px rgba(0,0,0,0.2)',
+                        }}>
+                            {['add', 'move', 'delete'].map(mode => (
+                                <button key={mode} style={toolBtnStyle(activeToolMode === mode)}
+                                    onClick={() => setTool(mode)}>
+                                    {mode.charAt(0).toUpperCase() + mode.slice(1)}
+                                </button>
+                            ))}
+                            <div style={{ width: 1, background: '#e0e0e0', margin: '0 2px' }} />
+                            <button style={toolBtnStyle(false)} onClick={() => importInputRef.current?.click()}>Import</button>
+                            <button style={toolBtnStyle(false)} onClick={handleExport}>Export</button>
+                            <input ref={importInputRef} type="file" accept=".geojson"
+                                style={{ display: 'none' }} onChange={handleImport} />
+                        </div>
+                        {activeToolMode && (
+                            <div style={{
+                                fontSize: 11, color: '#555',
+                                background: 'rgba(255,255,255,0.9)', borderRadius: 4, padding: '3px 10px',
+                                boxShadow: '0 1px 4px rgba(0,0,0,0.1)',
+                            }}>
+                                {activeToolMode === 'add'    && 'Click on the map to place a hospital'}
+                                {activeToolMode === 'move'   && 'Drag to move • click to edit properties'}
+                                {activeToolMode === 'delete' && 'Click a user hospital to remove it'}
+                            </div>
+                        )}
+                    </>
+                )}
+                <button
+                    onClick={() => { setEditOpen(o => !o); if (editOpen) setActiveToolMode(null); }}
+                    style={{
+                        padding: '7px 28px', borderRadius: 20,
+                        border: editOpen ? 'none' : '1px solid #ccc',
+                        background: editOpen ? '#111' : 'white',
+                        color: editOpen ? 'white' : '#333',
+                        cursor: 'pointer', fontSize: 13, fontWeight: 600,
+                        boxShadow: '0 2px 8px rgba(0,0,0,0.18)',
+                    }}
+                >
+                    edit
+                </button>
+            </div>
+
             {/* Map */}
             <MapContainer
                 center={[20.5937, 78.9629]}
@@ -465,23 +713,16 @@ export default function MapComponent() {
                 style={{ height: '100%', width: '100%', cursor: activeToolMode === 'add' ? 'crosshair' : undefined }}
             >
                 <MapClickHandler activeToolMode={activeToolMode} onAddClick={handleAddClick} />
-                <ZoomControl position="topleft" />
+                <ZoomControl position="topright" />
 
                 <TileLayer
                     key={basemap}
-                    url={basemap === 'osm'
-                        ? 'https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png'
-                        : 'https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}'}
-                    opacity={basemapOpacity}
-                    attribution={basemap === 'osm' ? '© OpenStreetMap contributors' : '© Esri'}
+                    url={BASEMAPS[basemap].url}
+                    attribution={BASEMAPS[basemap].attribution}
                 />
 
                 {/* {roads && <GeoJSON data={roads} style={{ color: 'gray', weight: 1 }} />} */}
-
-                {/*{subdistricts && (
-                    <GeoJSON data={subdistricts} style={{ color: 'blue', stroke: true, weight: 0.5, fillOpacity: 0.03 }} />
-                )}
-                */}
+                {/*{subdistricts && <GeoJSON data={subdistricts} style={{ color: 'blue', stroke: true, weight: 0.5, fillOpacity: 0.03 }} />}*/}
 
                 {/* Care pathway — rendered before hospitals so hospitals sit on top */}
                 {computedOutputs.carepathway && (
@@ -514,15 +755,19 @@ export default function MapComponent() {
                     <Marker
                         key={idx}
                         position={[h.geometry.coordinates[1], h.geometry.coordinates[0]]}
-                        draggable={activeToolMode === 'edit'}
+                        draggable={activeToolMode === 'move'}
                         icon={userHospitalIcon}
                         eventHandlers={{
                             dragend: (e) => handleDragEnd(idx, e.target.getLatLng()),
                             click: (e) => {
                                 L.DomEvent.stopPropagation(e);
                                 if (activeToolMode === 'delete') handleDeleteHospital(idx);
-                                if (activeToolMode === 'edit') {
-                                    setDialogState({ mode: 'edit', idx, latlng: { lat: h.geometry.coordinates[1], lng: h.geometry.coordinates[0] }, data: { ...h.properties } });
+                                if (activeToolMode === 'move') {
+                                    setDialogState({
+                                        mode: 'edit', idx,
+                                        latlng: { lat: h.geometry.coordinates[1], lng: h.geometry.coordinates[0] },
+                                        data: { ...h.properties },
+                                    });
                                 }
                             },
                         }}
@@ -535,12 +780,20 @@ export default function MapComponent() {
                 ))}
             </MapContainer>
 
-            {/* Hospital dialog */}
+            {/* Dialogs */}
             {dialogState && (
                 <HospitalDialog
                     dialogState={dialogState}
                     onSubmit={handleDialogSubmit}
                     onClose={() => setDialogState(null)}
+                />
+            )}
+            {functionSettingsOpen && (
+                <FunctionSettingsDialog
+                    activeFunction={activeFunction}
+                    settings={functionSettings}
+                    onSave={handleFunctionSettingsSave}
+                    onClose={() => setFunctionSettingsOpen(false)}
                 />
             )}
         </div>
