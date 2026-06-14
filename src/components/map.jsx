@@ -2,19 +2,22 @@ import React, { useState, useEffect, useRef } from 'react';
 import { MapContainer, TileLayer, GeoJSON, Marker, Tooltip, useMapEvents, ZoomControl } from 'react-leaflet';
 import L from 'leaflet';
 import 'leaflet/dist/leaflet.css';
-import { solveCarePathway } from '../services/turfService';
+import { solveCarePathway, getCellCatchment } from '../services/turfService';
+import { fetchHospitals, fetchPoiSubdistricts, fetchSplitRoads } from '../lib/fetchSpatial';
 
 // ── Constants ────────────────────────────────────────────────────────────────
 
 const CARE_BANDS = [
-    { color: '#3700ff', label: '0 – 50 km' },
-    { color: '#00b93e', label: '50 – 100 km' },
-    { color: '#ffa600', label: '100 – 200 km' },
-    { color: '#7c0d0d', label: '200+ km' },
+    { color: '#3700ff', light: '#c3b8ff', label: '0 – 50 km' },
+    { color: '#00b93e', light: '#a8e8c1', label: '50 – 100 km' },
+    { color: '#ffa600', light: '#ffe0a3', label: '100 – 200 km' },
+    { color: '#7c0d0d', light: '#e3a9a9', label: '200+ km' },
 ];
 
 const HOSPITAL_TYPES = ['Public', 'Private (For Profit)', 'Private (Not for Profit)'];
 const EMPANELMENT_OPTIONS = ['', 'PMJAY', 'Yes (Not Specified)'];
+
+const DEFAULT_FUNCTION_SETTINGS = { clusterRadius: 3, searchRadius: 0.1 };
 
 const BOOLEAN_FIELDS = [
     'Radiation Oncology', 'Medical Oncology', 'Surgical Oncology',
@@ -253,6 +256,8 @@ export default function MapComponent() {
     const [userAddedHospitals, setUserAddedHospitals] = useState([]);
     const [computedOutputs, setComputedOutputs] = useState({ carepathway: null });
     const [isComputing, setIsComputing] = useState(false);
+    const [isLoading, setIsLoading] = useState(true);
+    const [computeId, setComputeId] = useState(0);
     const [activeToolMode, setActiveToolMode] = useState(null);
     const [editOpen, setEditOpen] = useState(false);
     const [dialogState, setDialogState] = useState(null);
@@ -260,15 +265,22 @@ export default function MapComponent() {
     const [visibleTypes, setVisibleTypes] = useState(new Set(HOSPITAL_TYPES));
     const [hospitalTypes, setHospitalTypes] = useState(HOSPITAL_TYPES);
     const [activeFunction, setActiveFunction] = useState('carepathway');
-    const [functionSettings, setFunctionSettings] = useState({ clusterRadius: 0.4, searchRadius: 0.1 });
+    const [functionSettings, setFunctionSettings] = useState(DEFAULT_FUNCTION_SETTINGS);
     const [functionSettingsOpen, setFunctionSettingsOpen] = useState(false);
+    const [showVoronoi, setShowVoronoi] = useState(false);
+    const [catchment, setCatchment] = useState(null);
+    const [catchmentLoading, setCatchmentLoading] = useState(false);
 
     const roadsRef = useRef(null);
     const subdistRef = useRef(null);
     const hospitalsRef = useRef(null);
     const userAddedHospitalsRef = useRef([]);
     const visibleTypesRef = useRef(new Set(HOSPITAL_TYPES));
-    const functionSettingsRef = useRef({ clusterRadius: 0.4, searchRadius: 0.1 });
+    const functionSettingsRef = useRef(DEFAULT_FUNCTION_SETTINGS);
+    const showVoronoiRef = useRef(false);
+    const cellsRef = useRef([]);
+    const activeCatchmentKeyRef = useRef(null);
+    const activeToolModeRef = useRef(null);
     const spinnerRef = useRef(null);
     const importInputRef = useRef(null);
 
@@ -289,16 +301,13 @@ export default function MapComponent() {
         const load = async () => {
             try {
                 const base = import.meta.env.BASE_URL;
-                const [hospRes, roadsRes, subdistRes] = await Promise.all([
-                    fetch(`${base}laturHospital.geojson`),
-                    fetch(`${base}laturRoad.geojson`),
-                    fetch(`${base}laturSubdistrict.geojson`),
+                const [h, s, r] = await Promise.all([
+                    fetchHospitals(),
+                    fetchPoiSubdistricts(),
+                    fetchSplitRoads(),
                 ]);
-                const h = await hospRes.json();
-                const r = await roadsRes.json();
-                const s = await subdistRes.json();
 
-                console.log('[map] fetched — hospitals:', h.features?.length, 'roads:', r.features?.length, 'subdistricts:', s.features?.length);
+                console.log('[map] fetched — hospitals:', h.features?.length, 'poi subdistricts:', s.features?.length, 'roads:', r.features?.length);
 
                 const types = [...new Set(h.features.map(f => f.properties?.['Hospital Type']).filter(Boolean))];
                 types.push('No Data');
@@ -316,8 +325,10 @@ export default function MapComponent() {
                 setSubdistricts(s);
 
                 triggerCompute(h, [], r, s, initialVisible);
+                setIsLoading(false);
             } catch (err) {
                 console.error('Initialization failed:', err);
+                setIsLoading(false);
             }
         };
         load();
@@ -325,8 +336,14 @@ export default function MapComponent() {
 
     // ── Compute ────────────────────────────────────────────────────────────────
 
+    useEffect(() => { activeToolModeRef.current = activeToolMode; }, [activeToolMode]);
+
     const triggerCompute = async (baseH, userH, r, s, overrideVisibleTypes, overrideSettings) => {
+        if (!baseH || !r || !s) return;
         setIsComputing(true);
+        // Cells may change — drop any shown catchment (re-click to refresh).
+        setCatchment(null);
+        activeCatchmentKeyRef.current = null;
         try {
             const vt = overrideVisibleTypes ?? visibleTypesRef.current;
             const settings = overrideSettings ?? functionSettingsRef.current;
@@ -334,14 +351,11 @@ export default function MapComponent() {
                 const t = f.properties?.['Hospital Type'];
                 return t ? vt.has(t) : vt.has('No Data');
             });
-            const filteredUser = userH.filter(f => {
-                const t = f.properties?.['Hospital Type'];
-                return t ? vt.has(t) : vt.has('No Data');
-            });
-            const combined = { ...baseH, features: [...filteredBase, ...filteredUser] };
-            const results = await solveCarePathway(JSON.stringify(combined), JSON.stringify(r), JSON.stringify(s), settings);
+            const combined = { ...baseH, features: [...filteredBase, ...userH] };
+            const filterSig = [...vt].sort().join(',');
+            const results = await solveCarePathway(JSON.stringify(combined), JSON.stringify(r), JSON.stringify(s), settings, filterSig, showVoronoiRef.current);
             console.log('[map] compute result — carepathway features:', results?.carepathway?.features?.length);
-            if (results) setComputedOutputs(results);
+            if (results) { setComputedOutputs(results); setComputeId(n => n + 1); cellsRef.current = results.cells || []; }
         } catch (err) {
             console.error('Compute failed:', err);
         } finally {
@@ -448,6 +462,58 @@ export default function MapComponent() {
         }
     };
 
+    // ── Catchment on hospital click ──────────────────────────────────────────────
+
+    const handleHospitalClick = async (lng, lat) => {
+        const cells = cellsRef.current;
+        if (!cells.length) return;
+        let best = null, min = Infinity;
+        for (const c of cells) {
+            const dx = c.centroid[0] - lng, dy = c.centroid[1] - lat, d = dx * dx + dy * dy;
+            if (d < min) { min = d; best = c; }
+        }
+        if (!best || !best.masterIds.length) return;
+        const key = [...best.masterIds].sort().join(',');
+        if (activeCatchmentKeyRef.current === key) {          // toggle off
+            activeCatchmentKeyRef.current = null;
+            setCatchment(null);
+            return;
+        }
+        setCatchmentLoading(true);
+        try {
+            const result = await getCellCatchment(best.masterIds);
+            activeCatchmentKeyRef.current = key;
+            setCatchment({ ...result, bands: best.bands });
+        } catch (err) {
+            console.error('Catchment failed:', err);
+        } finally {
+            setCatchmentLoading(false);
+        }
+    };
+
+    const subdistrictStyle = (f) => {
+        const bi = catchment?.bands?.[f.properties?.master_id];
+        const band = CARE_BANDS[bi];
+        return {
+            color: band?.color || '#888',
+            weight: 1,
+            fillColor: band?.light || '#dddddd',
+            fillOpacity: 0.55,
+        };
+    };
+
+    // ── Voronoi debug overlay ───────────────────────────────────────────────────
+
+    const toggleVoronoi = () => {
+        const next = !showVoronoiRef.current;
+        showVoronoiRef.current = next;
+        setShowVoronoi(next);
+        // Turning on needs the clipped cells built — recompute (cached, fast) to populate.
+        if (next && hospitalsRef.current && roadsRef.current && subdistRef.current) {
+            triggerCompute(hospitalsRef.current, userAddedHospitalsRef.current, roadsRef.current, subdistRef.current);
+        }
+    };
+
     // ── Function switcher ──────────────────────────────────────────────────────
 
     const handleFunctionClick = (key) => {
@@ -457,6 +523,8 @@ export default function MapComponent() {
             triggerCompute(hospitalsRef.current, userAddedHospitalsRef.current, roadsRef.current, subdistRef.current);
         } else {
             setComputedOutputs({ carepathway: null });
+            setCatchment(null);
+            activeCatchmentKeyRef.current = null;
         }
     };
 
@@ -516,6 +584,35 @@ export default function MapComponent() {
                     border-bottom: 1px solid #e0e0e0 !important;
                 }
             `}</style>
+
+            {/* Full-screen loading overlay during initial data fetch */}
+            {isLoading && (
+                <div style={{
+                    position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.75)',
+                    display: 'flex', flexDirection: 'column',
+                    alignItems: 'center', justifyContent: 'center',
+                    zIndex: 10000, color: '#fff', gap: 16,
+                }}>
+                    <div style={{
+                        width: 48, height: 48,
+                        border: '4px solid rgba(255,255,255,0.3)',
+                        borderTopColor: '#fff', borderRadius: '50%',
+                        animation: 'spin 0.8s linear infinite',
+                    }} />
+                    <div style={{ fontSize: 15, opacity: 0.9 }}>Loading spatial data…</div>
+                </div>
+            )}
+
+            {catchmentLoading && (
+                <div style={{
+                    position: 'fixed', top: 70, left: '50%', transform: 'translateX(-50%)',
+                    zIndex: 10000, background: 'rgba(17,17,17,0.85)', color: '#fff',
+                    padding: '6px 14px', borderRadius: 16, fontSize: 12, fontWeight: 600,
+                    boxShadow: '0 2px 8px rgba(0,0,0,0.25)',
+                }}>
+                    Loading catchment…
+                </div>
+            )}
 
             {/* Cursor loading spinner */}
             <div ref={spinnerRef} style={{
@@ -622,7 +719,21 @@ export default function MapComponent() {
             </div>
 
             {/* Legend — bottom right, dynamic */}
-            <div style={{ position: 'absolute', bottom: 30, right: 10, zIndex: 1000, ...panelStyle, minWidth: 160 }}>
+            <div style={{ position: 'absolute', bottom: 30, right: 10, zIndex: 1000, display: 'flex', flexDirection: 'column', alignItems: 'stretch', gap: 8 }}>
+              <button
+                onClick={toggleVoronoi}
+                style={{
+                    padding: '7px 12px', borderRadius: 6, cursor: 'pointer',
+                    fontSize: 12, fontWeight: 600,
+                    border: showVoronoi ? 'none' : '1px solid #ccc',
+                    background: showVoronoi ? '#e64980' : 'white',
+                    color: showVoronoi ? 'white' : '#333',
+                    boxShadow: '0 2px 8px rgba(0,0,0,0.15)',
+                }}
+              >
+                {showVoronoi ? 'Hide Voronoi' : 'View Voronoi'}
+              </button>
+              <div style={{ ...panelStyle, minWidth: 160 }}>
                 <div style={{ fontWeight: 700, fontSize: 12, marginBottom: 8, color: '#111' }}>Legend</div>
                 <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 5 }}>
                     <span style={{
@@ -652,6 +763,7 @@ export default function MapComponent() {
                         ))}
                     </>
                 )}
+              </div>
             </div>
 
             {/* Edit toolbar — bottom center */}
@@ -721,19 +833,63 @@ export default function MapComponent() {
                     attribution={BASEMAPS[basemap].attribution}
                 />
 
-                {/* {roads && <GeoJSON data={roads} style={{ color: 'gray', weight: 1 }} />} */}
-                {/*{subdistricts && <GeoJSON data={subdistricts} style={{ color: 'blue', stroke: true, weight: 0.5, fillOpacity: 0.03 }} />}*/}
+                {/* Voronoi catchments — debug overlay, bottom-most */}
+                {showVoronoi && computedOutputs.voronoi && (
+                    <GeoJSON
+                        key={`voronoi-${computeId}`}
+                        data={computedOutputs.voronoi}
+                        style={{ color: '#e64980', weight: 1, fillColor: '#e64980', fillOpacity: 0.05 }}
+                        renderer={L.canvas({ padding: 0.5 })}
+                    />
+                )}
 
-                {/* Care pathway — rendered before hospitals so hospitals sit on top */}
+                {/* Base road network — below care pathway & hospitals (connectors hidden) */}
+                {roads && (
+                    <GeoJSON
+                        key="base-roads"
+                        data={roads}
+                        filter={(f) => !f.properties?.is_connector}
+                        style={{ color: '#9aa0a6', weight: 0.7 }}
+                        renderer={L.canvas({ padding: 0.5 })}
+                    />
+                )}
+
+                {/* Care pathway — canvas renderer avoids 100k+ SVG DOM elements */}
                 {computedOutputs.carepathway && (
                     <GeoJSON
-                        key={`path-${computedOutputs.carepathway.features?.length || 0}`}
+                        key={`path-${computeId}`}
                         data={computedOutputs.carepathway}
                         style={(f) => ({
                             color: f?.properties?.careColor || 'purple',
                             weight: f?.properties?.careLineWeight || 3,
                         })}
+                        renderer={L.canvas({ padding: 0.5 })}
                     />
+                )}
+
+                {/* Catchment — translucent subdistricts (hover for name) + dark dissolved outline */}
+                {catchment && (
+                    <>
+                        <GeoJSON
+                            key={`subs-${activeCatchmentKeyRef.current}`}
+                            data={catchment.subdistricts}
+                            style={subdistrictStyle}
+                            onEachFeature={(f, layer) => {
+                                const name = f.properties?.subdistrict_name || 'Subdistrict';
+                                layer.bindTooltip(name, { sticky: true, opacity: 0.95 });
+                                layer.on({
+                                    mouseover: (e) => e.target.setStyle({ fillColor: '#ffffff', color: '#ffffff', fillOpacity: 0.85, weight: 2 }),
+                                    mouseout:  (e) => e.target.setStyle(subdistrictStyle(f)),
+                                });
+                            }}
+                        />
+                        <GeoJSON
+                            key={`catchment-${activeCatchmentKeyRef.current}`}
+                            data={catchment.outline}
+                            style={{ color: '#000', weight: 5, fill: false }}
+                            interactive={false}
+                        />
+                    </>
                 )}
 
                 {/* Base hospitals — rendered above carepathway */}
@@ -746,6 +902,12 @@ export default function MapComponent() {
                             const name = f.properties?.name || 'Unknown';
                             const beds = f.properties?.['Bed Count'] ?? 'N/A';
                             layer.bindTooltip(`<b>${name}</b><br/>Beds: ${beds}`, { sticky: true, opacity: 0.92 });
+                            layer.on('click', () => {
+                                if (!activeToolModeRef.current) {
+                                    const [lng, lat] = f.geometry.coordinates;
+                                    handleHospitalClick(lng, lat);
+                                }
+                            });
                         }}
                     />
                 )}
@@ -762,12 +924,14 @@ export default function MapComponent() {
                             click: (e) => {
                                 L.DomEvent.stopPropagation(e);
                                 if (activeToolMode === 'delete') handleDeleteHospital(idx);
-                                if (activeToolMode === 'move') {
+                                else if (activeToolMode === 'move') {
                                     setDialogState({
                                         mode: 'edit', idx,
                                         latlng: { lat: h.geometry.coordinates[1], lng: h.geometry.coordinates[0] },
                                         data: { ...h.properties },
                                     });
+                                } else {
+                                    handleHospitalClick(h.geometry.coordinates[0], h.geometry.coordinates[1]);
                                 }
                             },
                         }}
