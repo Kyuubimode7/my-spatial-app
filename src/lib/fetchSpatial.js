@@ -13,17 +13,39 @@ function toFC(rows, propsFn) {
 
 async function fetchAll(viewName) {
     const pageSize = 1000;
-    let from = 0;
-    let all = [];
-    while (true) {
-        const { data, error } = await supabase
-            .from(viewName)
-            .select('*')
-            .range(from, from + pageSize - 1);
+
+    // Get the row count first so we can request every page in parallel.
+    const { count, error: countErr } = await supabase
+        .from(viewName)
+        .select('*', { count: 'exact', head: true });
+    if (countErr) throw countErr;
+
+    // Fallback to sequential paging if the count is unavailable.
+    if (count == null) {
+        let from = 0, all = [];
+        while (true) {
+            const { data, error } = await supabase.from(viewName).select('*').range(from, from + pageSize - 1);
+            if (error) throw error;
+            all = all.concat(data);
+            if (data.length < pageSize) break;
+            from += pageSize;
+        }
+        return all;
+    }
+
+    const pages = Math.ceil(count / pageSize);
+    const requests = [];
+    for (let p = 0; p < pages; p++) {
+        requests.push(
+            supabase.from(viewName).select('*').range(p * pageSize, p * pageSize + pageSize - 1)
+        );
+    }
+    const results = await Promise.all(requests);
+
+    const all = [];
+    for (const { data, error } of results) {
         if (error) throw error;
-        all = all.concat(data);
-        if (data.length < pageSize) break;
-        from += pageSize;
+        all.push(...data);
     }
     return all;
 }

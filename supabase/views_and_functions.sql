@@ -10,41 +10,46 @@
 -- Exposes hospital rows as GeoJSON geometry + all attribute columns.
 -- Consumed by fetchHospitals() in src/lib/fetchSpatial.js
 -- -----------------------------------------------------------------------------
-CREATE OR REPLACE VIEW hospitals_view AS
+-- NOTE: filtered to points inside india_boundary so stray out-of-country
+-- geocodes don't participate in clustering/routing.
+DROP VIEW IF EXISTS hospitals_view;
+CREATE VIEW hospitals_view AS
 SELECT
-    id,
-    ST_AsGeoJSON(geom)      AS geometry,
-    name,
-    hospital_type,
-    bed_count,
-    icu_bed_count,
-    ot_count,
-    doctor_count,
-    staff_count,
-    city,
-    state,
-    subdistrict,
-    links,
-    description,
-    built_up_area,
-    regional_h,
-    year_established,
-    accreditation,
-    empanelment,
-    radiation,
-    medical_oncology,
-    surgical_oncology,
-    medical_edu,
-    medical_research,
-    mammography,
-    ct_scan,
-    mri,
-    pet_ct,
-    ultrasound,
-    brachytherapy,
-    palliative,
-    bone_marrow
-FROM hospitals;
+    h.id,
+    ST_AsGeoJSON(h.geom, 5)      AS geometry,
+    h.name,
+    h.hospital_type,
+    h.bed_count,
+    h.icu_bed_count,
+    h.ot_count,
+    h.doctor_count,
+    h.staff_count,
+    h.city,
+    h.state,
+    h.subdistrict,
+    h.links,
+    h.description,
+    h.built_up_area,
+    h.regional_h,
+    h.year_established,
+    h.accreditation,
+    h.empanelment,
+    h.radiation,
+    h.medical_oncology,
+    h.surgical_oncology,
+    h.medical_edu,
+    h.medical_research,
+    h.mammography,
+    h.ct_scan,
+    h.mri,
+    h.pet_ct,
+    h.ultrasound,
+    h.brachytherapy,
+    h.palliative,
+    h.bone_marrow
+FROM hospitals h
+WHERE h.geom IS NOT NULL
+  AND EXISTS (SELECT 1 FROM india_boundary b WHERE ST_Intersects(h.geom, b.geom));
 
 
 -- -----------------------------------------------------------------------------
@@ -55,7 +60,7 @@ FROM hospitals;
 CREATE OR REPLACE VIEW metro_regions_view AS
 SELECT
     id,
-    ST_AsGeoJSON(geom)  AS geometry,
+    ST_AsGeoJSON(geom, 5)  AS geometry,
     name
 FROM metro_regions;
 
@@ -65,14 +70,16 @@ FROM metro_regions;
 -- Visual centre points for each subdistrict (already Points in the table).
 -- Consumed by fetchPoiSubdistricts() in src/lib/fetchSpatial.js
 -- -----------------------------------------------------------------------------
-CREATE OR REPLACE VIEW poi_subdistricts_view AS
+-- NOTE: filtered to points inside india_boundary (see hospitals_view note).
+DROP VIEW IF EXISTS poi_subdistricts_view;
+CREATE VIEW poi_subdistricts_view AS
 SELECT
-    id,
-    ST_AsGeoJSON(geom)      AS geometry,
-    master_id,
-    subdistrict_name,
-    pc11_subdistrict_id
-FROM poi_subdistricts;
+    p.id,
+    ST_AsGeoJSON(p.geom, 5)      AS geometry,
+    p.master_id
+FROM poi_subdistricts p
+WHERE p.geom IS NOT NULL
+  AND EXISTS (SELECT 1 FROM india_boundary b WHERE ST_Intersects(p.geom, b.geom));
 
 
 -- -----------------------------------------------------------------------------
@@ -83,7 +90,7 @@ FROM poi_subdistricts;
 CREATE OR REPLACE VIEW india_boundary_view AS
 SELECT
     id,
-    ST_AsGeoJSON(geom)  AS geometry
+    ST_AsGeoJSON(geom, 5)  AS geometry
 FROM india_boundary;
 
 
@@ -97,7 +104,7 @@ CREATE OR REPLACE VIEW subdistrict_boundaries_view AS
 SELECT
     master_id,
     subdistrict_name,
-    ST_AsGeoJSON(geom)  AS geometry
+    ST_AsGeoJSON(geom, 5)  AS geometry
 FROM subdistrict_boundaries;
 
 
@@ -118,7 +125,7 @@ DROP VIEW IF EXISTS roads_split_view;
 CREATE VIEW roads_split_view AS
 SELECT
     id,
-    ST_AsGeoJSON(geom)  AS geometry,
+    ST_AsGeoJSON(geom, 5)  AS geometry,
     is_connector
 FROM roads_split;
 

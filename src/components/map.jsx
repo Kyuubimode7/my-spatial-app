@@ -71,6 +71,14 @@ const baseHospitalIcon = L.divIcon({
     iconAnchor: [5, 5],
 });
 
+// Smaller, muted marker for hospitals filtered out of the functions.
+const baseHospitalIconSmall = L.divIcon({
+    className: '',
+    html: '<div style="width:7px;height:7px;background:#111;border:1px solid white;border-radius:50%;opacity:0.6"></div>',
+    iconSize: [10, 10],
+    iconAnchor: [5, 5],
+});
+
 const userHospitalIcon = L.divIcon({
     className: '',
     html: '<div style="width:12px;height:12px;background:#1d6ef5;border:2px solid white;border-radius:50%;box-shadow:0 1px 3px rgba(0,0,0,0.5)"></div>',
@@ -311,7 +319,8 @@ export default function MapComponent() {
 
                 const types = [...new Set(h.features.map(f => f.properties?.['Hospital Type']).filter(Boolean))];
                 types.push('No Data');
-                const initialVisible = new Set(types);
+                const OFF_BY_DEFAULT = new Set(['Private (For Profit)', 'No Data']);
+                const initialVisible = new Set(types.filter(t => !OFF_BY_DEFAULT.has(t)));
                 setHospitalTypes(types);
                 setVisibleTypes(initialVisible);
                 visibleTypesRef.current = initialVisible;
@@ -542,16 +551,15 @@ export default function MapComponent() {
     };
 
     // ── Display filter ─────────────────────────────────────────────────────────
+    // All hospitals stay on the map; filtered-out ones are drawn at half size and
+    // simply don't participate in the functions (handled in triggerCompute).
 
-    const displayedHospitals = hospitals
-        ? {
-            ...hospitals,
-            features: hospitals.features.filter(f => {
-                const t = f.properties?.['Hospital Type'];
-                return t ? visibleTypes.has(t) : visibleTypes.has('No Data');
-            }),
-          }
-        : null;
+    const isHospitalActive = (f) => {
+        const t = f.properties?.['Hospital Type'];
+        return t ? visibleTypes.has(t) : visibleTypes.has('No Data');
+    };
+
+    const displayedHospitals = hospitals;
 
     // ── Render ─────────────────────────────────────────────────────────────────
 
@@ -843,6 +851,18 @@ export default function MapComponent() {
                     />
                 )}
 
+                {/* Subdistrict POI points — shown with the Voronoi debug overlay */}
+                {showVoronoi && subdistricts && (
+                    <GeoJSON
+                        key="poi-points"
+                        data={subdistricts}
+                        pointToLayer={(f, ll) => L.circleMarker(ll, {
+                            radius: 2, color: '#c2255c', weight: 1, fillColor: '#e64980', fillOpacity: 0.85,
+                        })}
+                        renderer={L.canvas({ padding: 0.5 })}
+                    />
+                )}
+
                 {/* Base road network — below care pathway & hospitals (connectors hidden) */}
                 {roads && (
                     <GeoJSON
@@ -878,7 +898,7 @@ export default function MapComponent() {
                                 const name = f.properties?.subdistrict_name || 'Subdistrict';
                                 layer.bindTooltip(name, { sticky: true, opacity: 0.95 });
                                 layer.on({
-                                    mouseover: (e) => e.target.setStyle({ fillColor: '#ffffff', color: '#ffffff', fillOpacity: 0.85, weight: 2 }),
+                                    mouseover: (e) => e.target.setStyle({ fillColor: '#ffffff', color: '#ffffff', fillOpacity: 0.65, weight: 2 }),
                                     mouseout:  (e) => e.target.setStyle(subdistrictStyle(f)),
                                 });
                             }}
@@ -897,13 +917,13 @@ export default function MapComponent() {
                     <GeoJSON
                         key={`hosp-${displayedHospitals.features.length}-${[...visibleTypes].sort().join(',')}`}
                         data={displayedHospitals}
-                        pointToLayer={(f, ll) => L.marker(ll, { icon: baseHospitalIcon })}
+                        pointToLayer={(f, ll) => L.marker(ll, { icon: isHospitalActive(f) ? baseHospitalIcon : baseHospitalIconSmall })}
                         onEachFeature={(f, layer) => {
                             const name = f.properties?.name || 'Unknown';
                             const beds = f.properties?.['Bed Count'] ?? 'N/A';
                             layer.bindTooltip(`<b>${name}</b><br/>Beds: ${beds}`, { sticky: true, opacity: 0.92 });
                             layer.on('click', () => {
-                                if (!activeToolModeRef.current) {
+                                if (!activeToolModeRef.current && isHospitalActive(f)) {
                                     const [lng, lat] = f.geometry.coordinates;
                                     handleHospitalClick(lng, lat);
                                 }
