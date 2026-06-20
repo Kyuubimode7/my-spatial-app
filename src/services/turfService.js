@@ -11,6 +11,7 @@ const DEFAULT_SEARCH_RADIUS = 0.1;
 const BOUNDARY_TOLERANCE = 0.01;   // deg (~1km) — India outline simplification for clipping
 const MIN_PIECE_AREA     = 1e5;    // m² (0.1 km²) — ignore clip slivers smaller than this as orphans
 const OVERLAP_TOLERANCE  = 0.001;  // km — turf.lineOverlap tolerance for shared-border length
+const MAX_CELL_RADIUS_KM = 500;    // km — cap each Voronoi cell to a disk of this radius around its centroid
 
 const careBands = [
     { upTo: 50,       color: '#3700ff', weight: 6 },
@@ -382,10 +383,21 @@ export async function solveCarePathway(hospitalsStr, roadsStr, subdistStr, setti
         const pieces = clipCellToIndia(poly);
         if (pieces.length === 0) return;
 
-        let home = pieces.find((pc) => turf.booleanPointInPolygon(match, pc));
-        if (!home) home = pieces.reduce((a, b) => (turf.area(a) >= turf.area(b) ? a : b));
+        // Cap the cell to a 500 km disk around its centroid so sparse cells don't sprawl.
+        const disk = turf.circle(match.geometry.coordinates, MAX_CELL_RADIUS_KM, { units: 'kilometers', steps: 64 });
+        const capped = [];
+        for (const pc of pieces) {
+            try {
+                const clipped = turf.intersect(turf.featureCollection([pc, disk]));
+                if (clipped) capped.push(...turf.flatten(clipped).features);
+            } catch { /* skip degenerate piece */ }
+        }
+        if (capped.length === 0) return;
+
+        let home = capped.find((pc) => turf.booleanPointInPolygon(match, pc));
+        if (!home) home = capped.reduce((a, b) => (turf.area(a) >= turf.area(b) ? a : b));
         homePieces.push({ cellId, regionLabel, poly: home });
-        pieces.forEach((pc) => {
+        capped.forEach((pc) => {
             if (pc === home) return;
             if (turf.area(pc) < MIN_PIECE_AREA) return; // ignore clip slivers
             orphans.push({ fromCellId: cellId, poly: pc });
@@ -437,7 +449,11 @@ export async function solveCarePathway(hospitalsStr, roadsStr, subdistStr, setti
         for (const c of cand) {
             if (turf.booleanPointInPolygon(pt, c.poly)) return c.cellId;
         }
-        return nearestCentroidId(coord); // fallback for clip-precision misses
+        // No containing region: only fall back if within the radius cap, else drop.
+        const id = nearestCentroidId(coord);
+        if (id === -1) return null;
+        const d = turf.distance(turf.point(centroids[id].geometry.coordinates), pt, { units: 'kilometers' });
+        return d <= MAX_CELL_RADIUS_KM ? id : null;
     }
 
     const segsByCell = new Map();
@@ -445,6 +461,7 @@ export async function solveCarePathway(hospitalsStr, roadsStr, subdistStr, setti
         const mx = (seg[0][0] + seg[1][0]) / 2;
         const my = (seg[0][1] + seg[1][1]) / 2;
         const id = assignCell([mx, my]);
+        if (id == null) return;
         if (!segsByCell.has(id)) segsByCell.set(id, []);
         segsByCell.get(id).push(seg);
     });
@@ -452,6 +469,7 @@ export async function solveCarePathway(hospitalsStr, roadsStr, subdistStr, setti
     const poisByCell = new Map();
     inputSubdist.features.forEach((poi) => {
         const id = assignCell(poi.geometry.coordinates);
+        if (id == null) return;
         if (!poisByCell.has(id)) poisByCell.set(id, []);
         poisByCell.get(id).push(poi);
     });

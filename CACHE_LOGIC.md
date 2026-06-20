@@ -77,9 +77,12 @@ Result: `regionsByCell`, where a cell's region = its home piece plus any orphans
 
 ### Assignment (step 4)
 - Build an RBush over every region polygon (`{ bbox, poly, cellId }`).
+- Each cell is also clipped to a `MAX_CELL_RADIUS_KM` (500 km) disk around its
+  centroid before home/orphan selection, so sparse cells don't sprawl to the bbox edge.
 - `assignCell(coord)`: query the RBush at the point, `booleanPointInPolygon` against
-  candidates → `cellId`; fall back to `nearestCentroidId` if no polygon contains it
-  (rare, clip-precision misses).
+  candidates → `cellId`; fall back to `nearestCentroidId` **only if the nearest
+  centroid is within `MAX_CELL_RADIUS_KM`**, otherwise the point is dropped (returns
+  `null` and is skipped from routing/catchments — keeps the radius cap honest).
 - Road segments are assigned by their **midpoint**; POIs by their coordinate.
 
 ---
@@ -91,6 +94,7 @@ Result: `regionsByCell`, where a cell's region = its home piece plus any orphans
 | `BOUNDARY_TOLERANCE` (0.01°, ~1 km) | India outline simplification for clipping | Lower = captures finer concavities but slower `intersect` ×~400 cells |
 | `MIN_PIECE_AREA` (1e5 m², 0.1 km²) | Orphan sliver cutoff | Higher drops real small pieces (their POIs fall back to nearest-centroid) |
 | `OVERLAP_TOLERANCE` (0.001 km) | `lineOverlap` tolerance for shared-border length | Shared Voronoi edges are exact straight segments, so this can stay small |
+| `MAX_CELL_RADIUS_KM` (500 km) | Caps each cell to a disk around its centroid | Lower = tighter catchments but more dropped points; raise to disable the cap effectively |
 | `CELL_CACHE_CAP` / `CLIP_CACHE_CAP` (2000) | LRU caps | Memory vs hit rate across many filter/edit states |
 
 ---

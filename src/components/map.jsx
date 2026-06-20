@@ -298,19 +298,7 @@ export default function MapComponent() {
     const activeCatchmentKeyRef = useRef(null);
     const activeHospitalRef = useRef(null);  // identity of the selected hospital, for re-resolving on recompute
     const activeToolModeRef = useRef(null);
-    const spinnerRef = useRef(null);
     const importInputRef = useRef(null);
-
-    useEffect(() => {
-        const move = (e) => {
-            if (spinnerRef.current) {
-                spinnerRef.current.style.left = `${e.clientX + 16}px`;
-                spinnerRef.current.style.top = `${e.clientY + 16}px`;
-            }
-        };
-        document.addEventListener('mousemove', move);
-        return () => document.removeEventListener('mousemove', move);
-    }, []);
 
     // ── Load data ──────────────────────────────────────────────────────────────
 
@@ -865,16 +853,6 @@ export default function MapComponent() {
                 </div>
               );
             })()}
-
-            {/* Cursor loading spinner */}
-            <div ref={spinnerRef} style={{
-                position: 'fixed', zIndex: 9999, pointerEvents: 'none',
-                width: 20, height: 20, background: 'white', borderRadius: '50%',
-                boxShadow: '0 1px 4px rgba(0,0,0,0.2)',
-                border: '2px solid #ddd', borderTop: '2px solid #1d6ef5',
-                animation: 'spin 0.7s linear infinite',
-                display: isComputing ? 'block' : 'none',
-            }} />
 
             {/* Navbar */}
             <div style={{
