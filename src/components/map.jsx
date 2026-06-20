@@ -39,10 +39,10 @@ const DEFAULT_PROPS = {
     source: 'user_added',
 };
 
-const FUNCTION_KEYS = ['carepathway', 'voronoi', 'weighted-voronoi', 'circles', 'fn5', 'fn6'];
+const FUNCTION_KEYS = ['carepathway', 'fn2', 'weighted-voronoi', 'circles', 'fn5', 'fn6'];
 const FUNCTION_NAMES = {
     'carepathway':      'Care Pathways',
-    'voronoi':          'Voronoi',
+    'fn2':              'Function 2',
     'weighted-voronoi': 'Weighted Voronoi',
     'circles':          'Overlapping Circles',
     'fn5':              'Function 5',
@@ -260,7 +260,7 @@ function FunctionSettingsDialog({ activeFunction, settings, onSave, onClose }) {
 
 // ── Main component ────────────────────────────────────────────────────────────
 
-export default function MapComponent() {
+export default function MapComponent({ computeEnabled = true, onOpenSplash }) {
     const [roads, setRoads] = useState(null);
     const [subdistricts, setSubdistricts] = useState(null);
     const [hospitals, setHospitals] = useState(null);
@@ -299,6 +299,17 @@ export default function MapComponent() {
     const activeHospitalRef = useRef(null);  // identity of the selected hospital, for re-resolving on recompute
     const activeToolModeRef = useRef(null);
     const importInputRef = useRef(null);
+    const pendingInitialComputeRef = useRef(null);
+    const filterDebounceRef = useRef(null);
+
+    // Run the deferred initial compute once compute is enabled (splash closed).
+    useEffect(() => {
+        if (!computeEnabled) return;
+        const pending = pendingInitialComputeRef.current;
+        if (!pending) return;
+        pendingInitialComputeRef.current = null;
+        triggerCompute(pending.h, [], pending.r, pending.s, pending.initialVisible);
+    }, [computeEnabled]);
 
     // ── Load data ──────────────────────────────────────────────────────────────
 
@@ -330,7 +341,12 @@ export default function MapComponent() {
                 setRoads(r);
                 setSubdistricts(s);
 
-                triggerCompute(h, [], r, s, initialVisible);
+                // Defer the initial compute until the splash screen is closed.
+                if (computeEnabled) {
+                    triggerCompute(h, [], r, s, initialVisible);
+                } else {
+                    pendingInitialComputeRef.current = { h, r, s, initialVisible };
+                }
                 setIsLoading(false);
             } catch (err) {
                 console.error('Initialization failed:', err);
@@ -473,23 +489,35 @@ export default function MapComponent() {
         next.has(type) ? next.delete(type) : next.add(type);
         visibleTypesRef.current = next;
         setVisibleTypes(new Set(next));
-        if (hospitalsRef.current && roadsRef.current && subdistRef.current) {
-            triggerCompute(hospitalsRef.current, userAddedHospitalsRef.current, roadsRef.current, subdistRef.current, next);
-        }
+        // Debounce recompute so a user editing several filters in a row only
+        // triggers one compute 2.5s after their last change.
+        if (filterDebounceRef.current) clearTimeout(filterDebounceRef.current);
+        filterDebounceRef.current = setTimeout(() => {
+            filterDebounceRef.current = null;
+            if (hospitalsRef.current && roadsRef.current && subdistRef.current) {
+                triggerCompute(hospitalsRef.current, userAddedHospitalsRef.current, roadsRef.current, subdistRef.current, visibleTypesRef.current);
+            }
+        }, 2500);
     };
 
     // ── Catchment on hospital click ──────────────────────────────────────────────
 
     // Build & show the catchment for a hospital at [lng, lat]. The previous
     // catchment/dashboard stay on screen until the new one is ready.
-    const applyCatchment = async (lng, lat, name, subdistrict) => {
+    // Nearest cell centroid to a clicked hospital.
+    const findCell = (lng, lat) => {
         const cells = cellsRef.current;
-        if (!cells.length) return false;
+        if (!cells.length) return null;
         let best = null, min = Infinity;
         for (const c of cells) {
             const dx = c.centroid[0] - lng, dy = c.centroid[1] - lat, d = dx * dx + dy * dy;
             if (d < min) { min = d; best = c; }
         }
+        return best;
+    };
+
+    const applyCatchment = async (lng, lat, name, subdistrict) => {
+        const best = findCell(lng, lat);
         if (!best || !best.masterIds.length) return false;
         setCatchmentLoading(true);
         try {
@@ -514,13 +542,7 @@ export default function MapComponent() {
     };
 
     const handleHospitalClick = async (lng, lat, name, subdistrict, type, isUser) => {
-        const cells = cellsRef.current;
-        if (!cells.length) return;
-        let best = null, min = Infinity;
-        for (const c of cells) {
-            const dx = c.centroid[0] - lng, dy = c.centroid[1] - lat, d = dx * dx + dy * dy;
-            if (d < min) { min = d; best = c; }
-        }
+        const best = findCell(lng, lat);
         if (!best || !best.masterIds.length) return;
         const key = [...best.masterIds].sort().join(',');
         if (activeCatchmentKeyRef.current === key) {          // toggle off
@@ -572,12 +594,14 @@ export default function MapComponent() {
     const handleFunctionClick = (key) => {
         if (key === activeFunction) return;
         setActiveFunction(key);
-        if (key === 'carepathway' && hospitalsRef.current && roadsRef.current && subdistRef.current) {
+        // Switching functions clears any active catchment selection.
+        setCatchment(null);
+        activeCatchmentKeyRef.current = null;
+        const ready = hospitalsRef.current && roadsRef.current && subdistRef.current;
+        if (key === 'carepathway' && ready) {
             triggerCompute(hospitalsRef.current, userAddedHospitalsRef.current, roadsRef.current, subdistRef.current);
         } else {
             setComputedOutputs({ carepathway: null });
-            setCatchment(null);
-            activeCatchmentKeyRef.current = null;
         }
     };
 
@@ -589,7 +613,8 @@ export default function MapComponent() {
         functionSettingsRef.current = newSettings;
         setFunctionSettings(newSettings);
         setFunctionSettingsOpen(false);
-        if (activeFunction === 'carepathway' && hospitalsRef.current && roadsRef.current && subdistRef.current) {
+        const ready = hospitalsRef.current && roadsRef.current && subdistRef.current;
+        if (activeFunction === 'carepathway' && ready) {
             triggerCompute(hospitalsRef.current, userAddedHospitalsRef.current, roadsRef.current, subdistRef.current, undefined, newSettings);
         }
     };
@@ -864,11 +889,23 @@ export default function MapComponent() {
                 <span style={{ color: 'white', fontWeight: 700, fontSize: 18, letterSpacing: 0.3 }}>
                     Urban Health Data Platform
                 </span>
+                <span style={{
+                    position: 'absolute', left: '50%', transform: 'translateX(-50%)',
+                    color: 'white', fontWeight: 700, fontSize: 18, letterSpacing: 0.3,
+                    pointerEvents: 'none',
+                }}>
+                    India Cancer Hospitals
+                </span>
                 <div style={{ display: 'flex', gap: 28 }}>
-                    {['home', 'about', 'contact'].map(link => (
-                        <a key={link} href="#" onClick={e => e.preventDefault()}
-                            style={{ color: 'rgba(255,255,255,0.8)', fontSize: 13, textDecoration: 'none' }}>
-                            {link}
+                    {[
+                        { label: 'how to use', onClick: () => onOpenSplash?.('howto') },
+                        { label: 'about', onClick: () => onOpenSplash?.('about') },
+                        { label: 'contact', onClick: () => window.open('https://www.hosmac.com/', '_blank', 'noopener') },
+                    ].map(link => (
+                        <a key={link.label} href="#"
+                            onClick={e => { e.preventDefault(); link.onClick(); }}
+                            style={{ color: 'rgba(255,255,255,0.8)', fontSize: 13, textDecoration: 'none', cursor: 'pointer' }}>
+                            {link.label}
                         </a>
                     ))}
                 </div>

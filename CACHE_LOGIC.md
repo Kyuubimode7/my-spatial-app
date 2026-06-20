@@ -23,7 +23,17 @@ when nothing relevant changed.
 
 ---
 
-## The three caches (all module-level, persist across calls within a session)
+## Per-function cache bundles
+
+Caches are **not shared between functions**. `CACHES` holds one bundle per function
+(currently just `carepathway`), each `{ cellCache, clipCache, catchmentCache }`
+created by `makeCaches()`. `buildPartition`/`routePartition` receive a bundle and
+only ever touch that one, so switching functions never evicts or collides with
+another's work. `solveCarePathway` passes `CACHES.carepathway`. The per-cell cache
+key carries a `keyPrefix` (the function's `filterSig`) so additional functions can
+be added with their own namespacing.
+
+## The three caches (per bundle, persist across calls within a session)
 
 ### 1. `cellCache` — routed output per cell  ⭐ the important one
 - **Key:** `` `${filterSig}|${regionLabel}|${regionHash(pieces)}` ``

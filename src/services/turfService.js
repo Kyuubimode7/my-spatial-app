@@ -24,14 +24,20 @@ function mergeToPoint(features) {
     return turf.centroid(turf.featureCollection(features));
 }
 
-// ── Per-cell cache ───────────────────────────────────────────────────────────
-// Keyed by `${filterSig}|${regionLabel}|${polygonHash}`. A cell's cached routes
-// stay valid as long as its filter, cluster label, and catchment polygon are
-// unchanged — so adding/moving a point only invalidates the few cells near it.
+// ── Per-function caches (nothing shared between functions) ───────────────────
+// Each analysis function gets its own bundle so switching functions never evicts
+// or collides with another's cached work.
+//   cellCache    — cellSig (`${filterSig}|${regionLabel}|${polygonHash}`) -> { features, bands }
+//   clipCache    — unclipped cell hash -> { pieces: Polygon[] }
+//   catchmentCache — sorted master_id list -> { outline, subdistricts, areaKm2 }
 const CELL_CACHE_CAP = 2000;
 const CLIP_CACHE_CAP = 2000;
-const cellCache = new Map(); // cellSig -> { features, bands }
-const clipCache = new Map(); // unclipped cell hash -> { pieces: Polygon[] }
+function makeCaches() {
+    return { cellCache: new Map(), clipCache: new Map(), catchmentCache: new Map() };
+}
+const CACHES = {
+    carepathway: makeCaches(),
+};
 
 function lruGet(map, key) {
     if (!map.has(key)) return undefined;
@@ -273,19 +279,12 @@ function computeCell(cellSegs, centroid, poisInCell, searchRadius) {
     return { features: dissolveRoutes(routeLines), bands };
 }
 
-export async function solveCarePathway(hospitalsStr, roadsStr, subdistStr, settings = {}, filterSig = '') {
+// ── Partition builder ────────────────────────────────────────────────────────
+// Cluster a set of hospital features → Voronoi → India-clip → 500km cap → orphan
+// repair, and return the repaired regions plus an `assignCell` lookup. Shared by
+// each analysis function (currently Care Pathways uses one partition).
+function buildPartition(hospitalFeatures, metroRegions, subdistBbox, boundary, settings, caches) {
     const CLUSTER_RADIUS = settings.clusterRadius ?? DEFAULT_CLUSTER_RADIUS;
-    const SEARCH_RADIUS  = settings.searchRadius  ?? DEFAULT_SEARCH_RADIUS;
-    const inputHospital = JSON.parse(hospitalsStr);
-    const inputRoad     = JSON.parse(roadsStr);
-    const inputSubdist  = JSON.parse(subdistStr);
-
-    console.log('[turf] inputs — hospitals:', inputHospital.features.length, 'roads:', inputRoad.features.length, 'subdist:', inputSubdist.features.length);
-
-    const metroRegions = await fetchMetroRegions();
-    console.log('[turf] metro regions loaded:', metroRegions.features.length);
-
-    ensureRoadIndex(inputRoad);
 
     // --- Hospital clustering ---
     // Merge all hospitals within each metro region into a single centroid.
@@ -294,7 +293,7 @@ export async function solveCarePathway(hospitalsStr, roadsStr, subdistStr, setti
     const assignedIdxSet = new Set();
 
     metroRegions.features.forEach((regionFeature) => {
-        const inRegion = inputHospital.features
+        const inRegion = hospitalFeatures
             .map((h, i) => ({ h, i }))
             .filter(({ h }) => turf.booleanPointInPolygon(h, regionFeature));
         if (inRegion.length === 0) return;
@@ -304,7 +303,7 @@ export async function solveCarePathway(hospitalsStr, roadsStr, subdistStr, setti
         mergedPoints.push(c);
     });
 
-    const otherHospitals = inputHospital.features.filter((_, i) => !assignedIdxSet.has(i));
+    const otherHospitals = hospitalFeatures.filter((_, i) => !assignedIdxSet.has(i));
 
     if (otherHospitals.length > 0) {
         const clustered = turf.clustersDbscan(
@@ -328,20 +327,14 @@ export async function solveCarePathway(hospitalsStr, roadsStr, subdistStr, setti
     const mergedHospitals = turf.featureCollection(mergedPoints);
     mergedHospitals.features.forEach((f, i) => { f.properties._id = i; });
     const centroids = mergedHospitals.features;
-    console.log('[turf] clustering — metro regions used:', assignedIdxSet.size, 'other:', otherHospitals.length, 'merged total:', centroids.length);
+    console.log('[turf] clustering — metro used:', assignedIdxSet.size, 'other:', otherHospitals.length, 'merged total:', centroids.length);
 
     if (centroids.length === 0) {
-        return { carepathway: turf.featureCollection([]) };
-    }
-
-    if (inputSubdist.features.length === 0) {
-        console.warn('[turf] WARNING: 0 subdistrict POI points — check poi_subdistricts_view');
+        return { centroids: [], regionsByCell: new Map(), voronoiOut: turf.featureCollection([]), assignCell: () => null };
     }
 
     // --- Voronoi → India-clipped, orphan-repaired regions ---
-    const subdistBbox = turf.bbox(inputSubdist);
     const voronoiHospital = turf.voronoi(mergedHospitals, { bbox: subdistBbox });
-    const boundary = await ensureIndiaBoundary();
 
     function nearestCentroidId(coord) {
         let best = -1, min = Infinity;
@@ -357,7 +350,7 @@ export async function solveCarePathway(hospitalsStr, roadsStr, subdistStr, setti
     // Clip one Voronoi cell to India → its polygon pieces (cached by unclipped hash).
     function clipCellToIndia(poly) {
         const key = polygonHash(poly);
-        const hit = lruGet(clipCache, key);
+        const hit = lruGet(caches.clipCache, key);
         if (hit) return hit.pieces;
         let pieces = [];
         if (boundary) {
@@ -367,7 +360,7 @@ export async function solveCarePathway(hospitalsStr, roadsStr, subdistStr, setti
             } catch (e) { /* leave empty on failure */ }
         }
         if (pieces.length === 0) pieces = turf.flatten(poly).features; // fallback: unclipped
-        lruSet(clipCache, key, { pieces }, CLIP_CACHE_CAP);
+        lruSet(caches.clipCache, key, { pieces }, CLIP_CACHE_CAP);
         return pieces;
     }
 
@@ -434,7 +427,7 @@ export async function solveCarePathway(hospitalsStr, roadsStr, subdistStr, setti
         regionsByCell.get(target)?.pieces.push(poly);
     });
 
-    // --- Assign roads & POIs to cells by containment in the repaired regions ---
+    // --- assignCell: containment in the repaired regions, range-bounded fallback ---
     const regionTree = new RBush();
     regionsByCell.forEach((reg, cellId) => {
         reg.pieces.forEach((poly) => {
@@ -456,6 +449,23 @@ export async function solveCarePathway(hospitalsStr, roadsStr, subdistStr, setti
         return d <= MAX_CELL_RADIUS_KM ? id : null;
     }
 
+    // Repaired regions for the overlay / catchment (already India-clipped).
+    const voronoiOut = turf.featureCollection(
+        [...regionsByCell.entries()].flatMap(([cellId, reg]) =>
+            reg.pieces.map((poly) => turf.feature(poly.geometry, { _cellId: cellId, regionLabel: reg.regionLabel }))
+        )
+    );
+
+    return { centroids, regionsByCell, voronoiOut, assignCell };
+}
+
+// ── Route a partition: assign roads + POIs to its cells, then route each cell ──
+// `keyPrefix` namespaces the per-cell cache. Returns the dissolved features plus
+// per-cell POI bands/membership.
+function routePartition(part, poiFeatures, settings, caches, keyPrefix) {
+    const SEARCH_RADIUS = settings.searchRadius ?? DEFAULT_SEARCH_RADIUS;
+    const { centroids, regionsByCell, assignCell } = part;
+
     const segsByCell = new Map();
     roadSegments.forEach((seg) => {
         const mx = (seg[0][0] + seg[1][0]) / 2;
@@ -467,23 +477,20 @@ export async function solveCarePathway(hospitalsStr, roadsStr, subdistStr, setti
     });
 
     const poisByCell = new Map();
-    inputSubdist.features.forEach((poi) => {
+    poiFeatures.forEach((poi) => {
         const id = assignCell(poi.geometry.coordinates);
         if (id == null) return;
         if (!poisByCell.has(id)) poisByCell.set(id, []);
         poisByCell.get(id).push(poi);
     });
 
-    // --- Per-cell compute with caching (keyed on the repaired region) ---
-    console.time('routing');
     const allFeatures = [];
-    const cellBandsById = {}; // cellId -> { master_id: bandIndex } (routed distance)
+    const cellBandsById = {};
     let total = 0, cached = 0, recomputed = 0;
-
     regionsByCell.forEach((reg, cellId) => {
         total++;
-        const cellSig = `${filterSig}|${reg.regionLabel}|${regionHash(reg.pieces)}`;
-        let cellData = lruGet(cellCache, cellSig);
+        const cellSig = `${keyPrefix}${reg.regionLabel}|${regionHash(reg.pieces)}`;
+        let cellData = lruGet(caches.cellCache, cellSig);
         if (cellData) {
             cached++;
         } else {
@@ -493,28 +500,42 @@ export async function solveCarePathway(hospitalsStr, roadsStr, subdistStr, setti
                 poisByCell.get(cellId) || [],
                 SEARCH_RADIUS
             );
-            lruSet(cellCache, cellSig, cellData, CELL_CACHE_CAP);
+            lruSet(caches.cellCache, cellSig, cellData, CELL_CACHE_CAP);
             recomputed++;
         }
         for (const f of cellData.features) allFeatures.push(f);
         cellBandsById[cellId] = cellData.bands;
     });
+    console.log(`[turf] ${keyPrefix}cells — total:`, total, 'cached:', cached, 'recomputed:', recomputed);
+
+    return { features: allFeatures, cellBandsById, poisByCell };
+}
+
+export async function solveCarePathway(hospitalsStr, roadsStr, subdistStr, settings = {}, filterSig = '') {
+    const inputHospital = JSON.parse(hospitalsStr);
+    const inputRoad     = JSON.parse(roadsStr);
+    const inputSubdist  = JSON.parse(subdistStr);
+
+    console.log('[turf] inputs — hospitals:', inputHospital.features.length, 'roads:', inputRoad.features.length, 'subdist:', inputSubdist.features.length);
+
+    const metroRegions = await fetchMetroRegions();
+    const boundary = await ensureIndiaBoundary();
+    ensureRoadIndex(inputRoad);
+
+    if (inputSubdist.features.length === 0) {
+        console.warn('[turf] WARNING: 0 subdistrict POI points — check poi_subdistricts_view');
+    }
+    const subdistBbox = turf.bbox(inputSubdist);
+    const caches = CACHES.carepathway;
+
+    const part = buildPartition(inputHospital.features, metroRegions, subdistBbox, boundary, settings, caches);
+    if (part.centroids.length === 0) return { carepathway: turf.featureCollection([]) };
+
+    console.time('routing');
+    const { features, cellBandsById, poisByCell } = routePartition(part, inputSubdist.features, settings, caches, `${filterSig}|`);
     console.timeEnd('routing');
-    console.log('[turf] cells — total:', total, 'cached:', cached, 'recomputed:', recomputed);
 
-    const routesDissolved = turf.featureCollection(allFeatures);
-    console.log('[turf] done — dissolved segments:', allFeatures.length);
-
-    // Repaired regions for the overlay / catchment (already India-clipped).
-    const voronoiOut = turf.featureCollection(
-        [...regionsByCell.entries()].flatMap(([cellId, reg]) =>
-            reg.pieces.map((poly) => turf.feature(poly.geometry, { _cellId: cellId, regionLabel: reg.regionLabel }))
-        )
-    );
-
-    // Lightweight per-cell metadata for click-to-catchment: centroid, POI master_ids,
-    // and each POI's care band (by routed road distance, computed in computeCell).
-    const cells = centroids.map((c) => {
+    const cells = part.centroids.map((c) => {
         const cellPois = poisByCell.get(c.properties._id) || [];
         return {
             centroid: c.geometry.coordinates,
@@ -523,17 +544,13 @@ export async function solveCarePathway(hospitalsStr, roadsStr, subdistStr, setti
         };
     });
 
-    return {
-        carepathway: routesDissolved,
-        voronoi: voronoiOut,
-        cells,
-    };
+    return { carepathway: turf.featureCollection(features), voronoi: part.voronoiOut, cells };
 }
 
 // ── Catchment: union of a cell's subdistrict boundaries (cached by master_id set) ──
 // Returns { outline, subdistricts }: the dissolved boundary + the individual polygons.
 const CATCHMENT_OFFSET = 0.05; // km — buffer out/in to close sliver gaps between non-matching borders
-const catchmentCache = new Map();
+const catchmentCache = CACHES.carepathway.catchmentCache;
 export async function getCellCatchment(masterIds) {
     const key = [...masterIds].sort().join(',');
     if (catchmentCache.has(key)) return catchmentCache.get(key);
