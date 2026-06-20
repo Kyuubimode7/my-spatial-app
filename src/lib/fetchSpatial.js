@@ -1,11 +1,31 @@
 import { supabase } from './supabase';
 
+// Defensive: ensure polygon rings are closed (first === last) before handing
+// geometry to turf, which rejects unclosed rings. Source data should be valid,
+// but this guards against the occasional invalid/unclosed ring from imports.
+function closeRing(ring) {
+    if (ring.length < 3) return ring;
+    const a = ring[0], b = ring[ring.length - 1];
+    if (a[0] !== b[0] || a[1] !== b[1]) ring.push([a[0], a[1]]);
+    return ring;
+}
+
+function closeGeometry(geom) {
+    if (!geom) return geom;
+    if (geom.type === 'Polygon') {
+        geom.coordinates.forEach(closeRing);
+    } else if (geom.type === 'MultiPolygon') {
+        geom.coordinates.forEach(poly => poly.forEach(closeRing));
+    }
+    return geom;
+}
+
 function toFC(rows, propsFn) {
     return {
         type: 'FeatureCollection',
         features: rows.map(row => ({
             type: 'Feature',
-            geometry: JSON.parse(row.geometry),
+            geometry: closeGeometry(JSON.parse(row.geometry)),
             properties: propsFn(row),
         })),
     };
@@ -119,7 +139,11 @@ export async function fetchSubdistrictBoundaries(masterIds) {
         if (error) throw error;
         rows = rows.concat(data);
     }
-    return toFC(rows, row => ({ master_id: row.master_id, subdistrict_name: row.subdistrict_name }));
+    return toFC(rows, row => ({
+        master_id: row.master_id,
+        subdistrict_name: row.subdistrict_name,
+        pop_pc_total: row.pop_pc_total,
+    }));
 }
 
 export async function fetchSplitRoads() {

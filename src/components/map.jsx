@@ -2,7 +2,7 @@ import React, { useState, useEffect, useRef } from 'react';
 import { MapContainer, TileLayer, GeoJSON, Marker, Tooltip, useMapEvents, ZoomControl } from 'react-leaflet';
 import L from 'leaflet';
 import 'leaflet/dist/leaflet.css';
-import { solveCarePathway, getCellCatchment } from '../services/turfService';
+import { solveCarePathway, getCellCatchment, hospitalsInCatchment, subdistrictNameAt } from '../services/turfService';
 import { fetchHospitals, fetchPoiSubdistricts, fetchSplitRoads } from '../lib/fetchSpatial';
 
 // ── Constants ────────────────────────────────────────────────────────────────
@@ -14,7 +14,10 @@ const CARE_BANDS = [
     { color: '#7c0d0d', light: '#e3a9a9', label: '200+ km' },
 ];
 
-const HOSPITAL_TYPES = ['Public', 'Private (For Profit)', 'Private (Not for Profit)'];
+// Highlight style applied to a catchment subdistrict on hover (map or dashboard).
+const SUBDISTRICT_HOVER_STYLE = { fillColor: '#ffffff', color: '#ffffff', fillOpacity: 0.65, weight: 2 };
+
+const HOSPITAL_TYPES = ['Public', 'Private', 'Trust'];
 const EMPANELMENT_OPTIONS = ['', 'PMJAY', 'Yes (Not Specified)'];
 
 const DEFAULT_FUNCTION_SETTINGS = { clusterRadius: 3, searchRadius: 0.1 };
@@ -278,6 +281,11 @@ export default function MapComponent() {
     const [showVoronoi, setShowVoronoi] = useState(false);
     const [catchment, setCatchment] = useState(null);
     const [catchmentLoading, setCatchmentLoading] = useState(false);
+    const [dashboardCollapsed, setDashboardCollapsed] = useState(false);
+    const [filteredOutNotice, setFilteredOutNotice] = useState(false);
+    // Leaflet layer lookups so the dashboard list can drive map hover.
+    const subLayerRef = useRef(new Map());   // master_id -> subdistrict layer
+    const hospLayerRef = useRef(new Map());  // hospital name -> marker layer
 
     const roadsRef = useRef(null);
     const subdistRef = useRef(null);
@@ -288,6 +296,7 @@ export default function MapComponent() {
     const showVoronoiRef = useRef(false);
     const cellsRef = useRef([]);
     const activeCatchmentKeyRef = useRef(null);
+    const activeHospitalRef = useRef(null);  // identity of the selected hospital, for re-resolving on recompute
     const activeToolModeRef = useRef(null);
     const spinnerRef = useRef(null);
     const importInputRef = useRef(null);
@@ -319,7 +328,7 @@ export default function MapComponent() {
 
                 const types = [...new Set(h.features.map(f => f.properties?.['Hospital Type']).filter(Boolean))];
                 types.push('No Data');
-                const OFF_BY_DEFAULT = new Set(['Private (For Profit)', 'No Data']);
+                const OFF_BY_DEFAULT = new Set(['Private', 'No Data']);
                 const initialVisible = new Set(types.filter(t => !OFF_BY_DEFAULT.has(t)));
                 setHospitalTypes(types);
                 setVisibleTypes(initialVisible);
@@ -350,9 +359,6 @@ export default function MapComponent() {
     const triggerCompute = async (baseH, userH, r, s, overrideVisibleTypes, overrideSettings) => {
         if (!baseH || !r || !s) return;
         setIsComputing(true);
-        // Cells may change — drop any shown catchment (re-click to refresh).
-        setCatchment(null);
-        activeCatchmentKeyRef.current = null;
         try {
             const vt = overrideVisibleTypes ?? visibleTypesRef.current;
             const settings = overrideSettings ?? functionSettingsRef.current;
@@ -362,9 +368,22 @@ export default function MapComponent() {
             });
             const combined = { ...baseH, features: [...filteredBase, ...userH] };
             const filterSig = [...vt].sort().join(',');
-            const results = await solveCarePathway(JSON.stringify(combined), JSON.stringify(r), JSON.stringify(s), settings, filterSig, showVoronoiRef.current);
+            const results = await solveCarePathway(JSON.stringify(combined), JSON.stringify(r), JSON.stringify(s), settings, filterSig);
             console.log('[map] compute result — carepathway features:', results?.carepathway?.features?.length);
             if (results) { setComputedOutputs(results); setComputeId(n => n + 1); cellsRef.current = results.cells || []; }
+
+            // Refresh the selected hospital's catchment against the new cells.
+            // The old catchment/dashboard stay visible until this completes.
+            const active = activeHospitalRef.current;
+            if (active) {
+                const passes = active.isUser || (active.type ? vt.has(active.type) : vt.has('No Data'));
+                if (!passes) {
+                    // Hospital no longer participates — prompt, keep old catchment until OK.
+                    setFilteredOutNotice(true);
+                } else {
+                    await applyCatchment(active.lng, active.lat, active.name, active.subdistrict);
+                }
+            }
         } catch (err) {
             console.error('Compute failed:', err);
         } finally {
@@ -473,7 +492,40 @@ export default function MapComponent() {
 
     // ── Catchment on hospital click ──────────────────────────────────────────────
 
-    const handleHospitalClick = async (lng, lat) => {
+    // Build & show the catchment for a hospital at [lng, lat]. The previous
+    // catchment/dashboard stay on screen until the new one is ready.
+    const applyCatchment = async (lng, lat, name, subdistrict) => {
+        const cells = cellsRef.current;
+        if (!cells.length) return false;
+        let best = null, min = Infinity;
+        for (const c of cells) {
+            const dx = c.centroid[0] - lng, dy = c.centroid[1] - lat, d = dx * dx + dy * dy;
+            if (d < min) { min = d; best = c; }
+        }
+        if (!best || !best.masterIds.length) return false;
+        setCatchmentLoading(true);
+        try {
+            const result = await getCellCatchment(best.masterIds);
+            activeCatchmentKeyRef.current = [...best.masterIds].sort().join(',');
+            const allHosp = [
+                ...(hospitalsRef.current?.features || []),
+                ...userAddedHospitalsRef.current,
+            ];
+            const inside = hospitalsInCatchment(result.outline, allHosp)
+                .filter((h) => h.properties?.name !== name);
+            const sub = subdistrictNameAt(result.subdistricts, lng, lat, subdistRef.current) || subdistrict;
+            const filterTypes = [...visibleTypesRef.current].join(', ') || 'No filters';
+            setCatchment({ ...result, bands: best.bands, hospitalName: name, hospitalSubdistrict: sub, hospitals: inside, filterTypes });
+            return true;
+        } catch (err) {
+            console.error('Catchment failed:', err);
+            return false;
+        } finally {
+            setCatchmentLoading(false);
+        }
+    };
+
+    const handleHospitalClick = async (lng, lat, name, subdistrict, type, isUser) => {
         const cells = cellsRef.current;
         if (!cells.length) return;
         let best = null, min = Infinity;
@@ -485,19 +537,12 @@ export default function MapComponent() {
         const key = [...best.masterIds].sort().join(',');
         if (activeCatchmentKeyRef.current === key) {          // toggle off
             activeCatchmentKeyRef.current = null;
+            activeHospitalRef.current = null;
             setCatchment(null);
             return;
         }
-        setCatchmentLoading(true);
-        try {
-            const result = await getCellCatchment(best.masterIds);
-            activeCatchmentKeyRef.current = key;
-            setCatchment({ ...result, bands: best.bands });
-        } catch (err) {
-            console.error('Catchment failed:', err);
-        } finally {
-            setCatchmentLoading(false);
-        }
+        activeHospitalRef.current = { lng, lat, name, subdistrict, type, isUser };
+        await applyCatchment(lng, lat, name, subdistrict);
     };
 
     const subdistrictStyle = (f) => {
@@ -511,16 +556,27 @@ export default function MapComponent() {
         };
     };
 
+    // Dashboard list → map hover linking.
+    const hoverSubdistrict = (masterId, on) => {
+        const entry = subLayerRef.current.get(masterId);
+        if (!entry) return;
+        const { layer, feature } = entry;
+        if (on) { layer.setStyle(SUBDISTRICT_HOVER_STYLE); layer.openTooltip?.(); }
+        else { layer.setStyle(subdistrictStyle(feature)); layer.closeTooltip?.(); }
+    };
+    const hoverHospital = (name, on) => {
+        const layer = hospLayerRef.current.get(name);
+        if (!layer) return;
+        if (on) layer.openTooltip?.(); else layer.closeTooltip?.();
+    };
+
     // ── Voronoi debug overlay ───────────────────────────────────────────────────
 
     const toggleVoronoi = () => {
         const next = !showVoronoiRef.current;
         showVoronoiRef.current = next;
         setShowVoronoi(next);
-        // Turning on needs the clipped cells built — recompute (cached, fast) to populate.
-        if (next && hospitalsRef.current && roadsRef.current && subdistRef.current) {
-            triggerCompute(hospitalsRef.current, userAddedHospitalsRef.current, roadsRef.current, subdistRef.current);
-        }
+        // Regions are always computed and returned now, so just toggle rendering.
     };
 
     // ── Function switcher ──────────────────────────────────────────────────────
@@ -593,6 +649,38 @@ export default function MapComponent() {
                 }
             `}</style>
 
+            {/* Filtered-out notice — centered lightbox */}
+            {filteredOutNotice && (
+                <div style={{
+                    position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.45)',
+                    zIndex: 4000, display: 'flex', alignItems: 'center', justifyContent: 'center',
+                }}>
+                    <div style={{
+                        background: 'white', borderRadius: 10, padding: '24px 28px', width: 360,
+                        boxShadow: '0 4px 20px rgba(0,0,0,0.3)', textAlign: 'center',
+                    }}>
+                        <div style={{ fontSize: 15, color: '#222', marginBottom: 20 }}>
+                            The selected hospital was filtered out
+                        </div>
+                        <button
+                            onClick={() => {
+                                setFilteredOutNotice(false);
+                                activeHospitalRef.current = null;
+                                activeCatchmentKeyRef.current = null;
+                                setCatchment(null);
+                            }}
+                            style={{
+                                padding: '7px 28px', borderRadius: 20, border: 'none',
+                                background: '#111', color: 'white', cursor: 'pointer',
+                                fontSize: 13, fontWeight: 600,
+                            }}
+                        >
+                            OK
+                        </button>
+                    </div>
+                </div>
+            )}
+
             {/* Full-screen loading overlay during initial data fetch */}
             {isLoading && (
                 <div style={{
@@ -611,16 +699,172 @@ export default function MapComponent() {
                 </div>
             )}
 
-            {catchmentLoading && (
+            {/* Computing overlay — same layout as the initial load, lighter backdrop */}
+            {(isComputing || catchmentLoading) && !isLoading && (
                 <div style={{
-                    position: 'fixed', top: 70, left: '50%', transform: 'translateX(-50%)',
-                    zIndex: 10000, background: 'rgba(17,17,17,0.85)', color: '#fff',
-                    padding: '6px 14px', borderRadius: 16, fontSize: 12, fontWeight: 600,
-                    boxShadow: '0 2px 8px rgba(0,0,0,0.25)',
+                    position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.35)',
+                    display: 'flex', flexDirection: 'column',
+                    alignItems: 'center', justifyContent: 'center',
+                    zIndex: 10000, color: '#fff', gap: 16,
                 }}>
-                    Loading catchment…
+                    <div style={{
+                        width: 48, height: 48,
+                        border: '4px solid rgba(255,255,255,0.3)',
+                        borderTopColor: '#fff', borderRadius: '50%',
+                        animation: 'spin 0.8s linear infinite',
+                    }} />
+                    <div style={{ fontSize: 15, opacity: 0.9 }}>Computing…</div>
                 </div>
             )}
+
+            {/* Catchment dashboard — top-centre, below the navbar */}
+            {catchment && (() => {
+              const PANEL_MAX_H = 150;               // ← panel / section max height
+              const subs = [...(catchment.subdistricts?.features || [])]
+                  .map(f => ({
+                      masterId: f.properties?.master_id,
+                      name: f.properties?.subdistrict_name || 'Unknown',
+                      pop: Number(f.properties?.pop_pc_total) || 0,
+                  }))
+                  .sort((a, b) => b.pop - a.pop);
+              const totalPop = subs.reduce((sum, s) => sum + s.pop, 0);
+              const totalArea = catchment.areaKm2 || 0;
+              // Other hospitals inside the catchment: filter-matching first, then the rest.
+              const otherHosp = [...(catchment.hospitals || [])].sort((a, b) => {
+                  const aa = isHospitalActive(a) ? 0 : 1;
+                  const bb = isHospitalActive(b) ? 0 : 1;
+                  return aa - bb;
+              });
+              const cellBorder = '1px solid #eee';
+              const rowStyle = {
+                  display: 'flex', justifyContent: 'space-between', gap: 8,
+                  padding: '2px 0', fontSize: 12, color: '#222', cursor: 'default',
+              };
+              const statRow = { fontSize: 11, color: '#555', marginTop: 2, textAlign: 'left' };
+              const statLabel = { color: '#000000' };
+              const open = !dashboardCollapsed;
+              return (
+                <div style={{
+                    position: 'absolute', top: 65, left: '50%', transform: 'translateX(-50%)',
+                    zIndex: 1200, width: '80vw',
+                    display: 'flex', flexDirection: 'column', alignItems: 'center',
+                }}>
+                  {/* Collapse / dashboard toggle — top centre, mirrors the bottom edit button */}
+                  <button
+                    onClick={() => setDashboardCollapsed(c => !c)}
+                    style={{
+                        position: 'relative', zIndex: 2,
+                        padding: '7px 28px', borderRadius: 20,
+                        border: open ? 'none' : '1px solid #ccc',
+                        background: open ? '#111' : 'white',
+                        color: open ? 'white' : '#333',
+                        cursor: 'pointer', fontSize: 13, fontWeight: 600,
+                        boxShadow: '0 2px 8px rgba(0,0,0,0.18)',
+                    }}
+                  >
+                    {open ? 'hide' : 'stats'}
+                  </button>
+
+                  {open && (
+                <div style={{ position: 'relative', width: '100%', marginTop: -16 }}>
+                  {/* Filter-types tab — top-left, like the edge of a file folder */}
+                  <div style={{
+                      position: 'absolute', bottom: '100%', left: 0,
+                      width: '20%', boxSizing: 'border-box',        // match the 1st grid column (1/5 of panel)
+                      background: '#000000', padding: '0px 12px',
+                      borderRadius: '10px 10px 0 0',
+                      whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis',
+                      fontSize: 12, color: '#ffffff',
+                      boxShadow: '0 -2px 6px rgba(0,0,0,0.10)',
+                  }}>
+                      <span style={{ fontWeight: 700 }}>Filter Type: </span>{catchment.filterTypes || 'No filters'}
+                  </div>
+                <div style={{
+                    // ── PANEL SIZE (edit here) ──
+                    width: '100%', maxHeight: PANEL_MAX_H,         // fills wrapper (80vw), fixed max height
+                    // ────────────────────────────
+                    display: 'grid', gridTemplateColumns: 'repeat(5, 1fr)',
+                    background: '#fff', borderRadius: '0 10px 10px 10px',
+                    boxShadow: '0 4px 18px rgba(0,0,0,0.25)', overflow: 'hidden',
+                    fontFamily: 'inherit',
+                }}>
+                    {/* 1: hospital name + catchment stats */}
+                    <div style={{
+                        gridColumn: 'span 1', padding: '12px 16px', borderRight: cellBorder,
+                        display: 'flex', flexDirection: 'column', justifyContent: 'center',
+                        maxHeight: PANEL_MAX_H, overflowY: 'auto',
+                    }}>
+                        <div style={{ fontSize: 16, fontWeight: 700, color: '#111', lineHeight: 1.6 }}>
+                            {catchment.hospitalName || 'Hospital'}
+                        </div>
+                        <div style={{ ...statRow, textAlign: 'center' }}>
+                            <span style={statLabel}>Subdistrict: </span>{catchment.hospitalSubdistrict || '—'}
+                        </div>
+                        <div style={{ ...statRow, display: 'flex', justifyContent: 'space-between', gap: 8 }}>
+                            <span style={statLabel}>Catchment Population: </span>
+                            <span>{(totalPop / 1e6).toFixed(1)} mil</span>
+                        </div>
+                        <div style={{ ...statRow, display: 'flex', justifyContent: 'space-between', gap: 8 }}>
+                            <span style={statLabel}>Catchment Area: </span>
+                            <span>{Math.round(totalArea).toLocaleString()} km²</span>
+                        </div>
+                    </div>
+
+                    {/* 2–4: subdistricts in 3 columns, scrolls vertically when overflowing */}
+                    <div style={{
+                        gridColumn: 'span 3', borderRight: cellBorder,
+                        display: 'grid', gridTemplateColumns: 'repeat(3, 1fr)',
+                        columnGap: 20, alignContent: 'start', padding: '12px 16px',
+                        maxHeight: PANEL_MAX_H, overflowY: 'auto',
+                    }}>
+                        {subs.map((s, i) => (
+                            <div key={i} style={{ ...rowStyle, cursor: 'pointer' }}
+                                onMouseEnter={() => hoverSubdistrict(s.masterId, true)}
+                                onMouseLeave={() => hoverSubdistrict(s.masterId, false)}>
+                                <span style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                                    {s.name}
+                                </span>
+                                <span style={{ fontWeight: 600, color: '#444', whiteSpace: 'nowrap' }}>
+                                    {s.pop ? s.pop.toLocaleString() : '—'}
+                                </span>
+                            </div>
+                        ))}
+                    </div>
+
+                    {/* 5: other hospitals in the catchment (scrolls, sticky title) */}
+                    <div style={{
+                        gridColumn: 'span 1', padding: '0 16px 12px',
+                        maxHeight: PANEL_MAX_H, overflowY: 'auto',
+                    }}>
+                        <div style={{
+                            position: 'sticky', top: 0, background: '#fff', zIndex: 1,
+                            paddingTop: 12, paddingBottom: 4,
+                            fontSize: 10, fontWeight: 700, color: '#999', textTransform: 'uppercase', letterSpacing: 0.5,
+                        }}>
+                            Other Hospitals in Catchment
+                        </div>
+                        {otherHosp.length === 0 && (
+                            <div style={{ fontSize: 12, color: '#aaa' }}>None</div>
+                        )}
+                        {otherHosp.map((h, i) => (
+                            <div key={i} style={{
+                                ...rowStyle, cursor: 'pointer',
+                                color: isHospitalActive(h) ? '#222' : '#aaa',
+                            }}
+                                onMouseEnter={() => hoverHospital(h.properties?.name, true)}
+                                onMouseLeave={() => hoverHospital(h.properties?.name, false)}>
+                                <span style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                                    {h.properties?.name || 'Unknown'}
+                                </span>
+                            </div>
+                        ))}
+                    </div>
+                </div>
+                </div>
+                  )}
+                </div>
+              );
+            })()}
 
             {/* Cursor loading spinner */}
             <div ref={spinnerRef} style={{
@@ -896,9 +1140,10 @@ export default function MapComponent() {
                             style={subdistrictStyle}
                             onEachFeature={(f, layer) => {
                                 const name = f.properties?.subdistrict_name || 'Subdistrict';
+                                if (f.properties?.master_id != null) subLayerRef.current.set(f.properties.master_id, { layer, feature: f });
                                 layer.bindTooltip(name, { sticky: true, opacity: 0.95 });
                                 layer.on({
-                                    mouseover: (e) => e.target.setStyle({ fillColor: '#ffffff', color: '#ffffff', fillOpacity: 0.65, weight: 2 }),
+                                    mouseover: (e) => e.target.setStyle(SUBDISTRICT_HOVER_STYLE),
                                     mouseout:  (e) => e.target.setStyle(subdistrictStyle(f)),
                                 });
                             }}
@@ -917,15 +1162,24 @@ export default function MapComponent() {
                     <GeoJSON
                         key={`hosp-${displayedHospitals.features.length}-${[...visibleTypes].sort().join(',')}`}
                         data={displayedHospitals}
-                        pointToLayer={(f, ll) => L.marker(ll, { icon: isHospitalActive(f) ? baseHospitalIcon : baseHospitalIconSmall })}
+                        pointToLayer={(f, ll) => {
+                            const active = isHospitalActive(f);
+                            // Active markers sit above inactive ones so an overlapping
+                            // click always lands on a valid (clickable) hospital.
+                            return L.marker(ll, {
+                                icon: active ? baseHospitalIcon : baseHospitalIconSmall,
+                                zIndexOffset: active ? 1000 : 0,
+                            });
+                        }}
                         onEachFeature={(f, layer) => {
                             const name = f.properties?.name || 'Unknown';
                             const beds = f.properties?.['Bed Count'] ?? 'N/A';
+                            hospLayerRef.current.set(name, layer);
                             layer.bindTooltip(`<b>${name}</b><br/>Beds: ${beds}`, { sticky: true, opacity: 0.92 });
                             layer.on('click', () => {
                                 if (!activeToolModeRef.current && isHospitalActive(f)) {
                                     const [lng, lat] = f.geometry.coordinates;
-                                    handleHospitalClick(lng, lat);
+                                    handleHospitalClick(lng, lat, f.properties?.name, f.properties?.subdistrict, f.properties?.['Hospital Type'], false);
                                 }
                             });
                         }}
@@ -939,6 +1193,7 @@ export default function MapComponent() {
                         position={[h.geometry.coordinates[1], h.geometry.coordinates[0]]}
                         draggable={activeToolMode === 'move'}
                         icon={userHospitalIcon}
+                        ref={(layer) => { if (layer && h.properties?.name) hospLayerRef.current.set(h.properties.name, layer); }}
                         eventHandlers={{
                             dragend: (e) => handleDragEnd(idx, e.target.getLatLng()),
                             click: (e) => {
@@ -951,7 +1206,7 @@ export default function MapComponent() {
                                         data: { ...h.properties },
                                     });
                                 } else {
-                                    handleHospitalClick(h.geometry.coordinates[0], h.geometry.coordinates[1]);
+                                    handleHospitalClick(h.geometry.coordinates[0], h.geometry.coordinates[1], h.properties.name, h.properties.subdistrict, h.properties['Hospital Type'], true);
                                 }
                             },
                         }}

@@ -104,6 +104,7 @@ CREATE OR REPLACE VIEW subdistrict_boundaries_view AS
 SELECT
     master_id,
     subdistrict_name,
+    pop_pc_total,
     ST_AsGeoJSON(geom, 5)  AS geometry
 FROM subdistrict_boundaries;
 
