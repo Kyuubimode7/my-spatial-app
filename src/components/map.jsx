@@ -301,9 +301,13 @@ export default function MapComponent({ computeEnabled = true, onOpenSplash }) {
     const importInputRef = useRef(null);
     const pendingInitialComputeRef = useRef(null);
     const filterDebounceRef = useRef(null);
+    const computeEnabledRef = useRef(computeEnabled);
 
     // Run the deferred initial compute once compute is enabled (splash closed).
+    // Uses a ref so the data-load effect (which captures computeEnabled at mount)
+    // reads the live value rather than the stale initial one.
     useEffect(() => {
+        computeEnabledRef.current = computeEnabled;
         if (!computeEnabled) return;
         const pending = pendingInitialComputeRef.current;
         if (!pending) return;
@@ -342,7 +346,7 @@ export default function MapComponent({ computeEnabled = true, onOpenSplash }) {
                 setSubdistricts(s);
 
                 // Defer the initial compute until the splash screen is closed.
-                if (computeEnabled) {
+                if (computeEnabledRef.current) {
                     triggerCompute(h, [], r, s, initialVisible);
                 } else {
                     pendingInitialComputeRef.current = { h, r, s, initialVisible };
